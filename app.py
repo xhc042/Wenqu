@@ -576,13 +576,13 @@ async def get_course_history(course_id: str):
             chapter_title = ch.get("title", "")
 
         history.append({
-            "session": s,
+            "session": _utc_dict(_utc_dict(s, "started_at"), "ended_at"),
             "message_count": len(messages),
             "user_message_count": len(user_msgs),
             "assistant_message_count": len(assistant_msgs),
-            "diaries": diaries_list,
-            "group_chats": group_chats,
-            "summaries": summaries_list,
+            "diaries": _utc_list(diaries_list, "created_at"),
+            "group_chats": _utc_list(group_chats, "created_at"),
+            "summaries": _utc_list(summaries_list, "created_at"),
             "user_messages": [m["content"][:100] for m in user_msgs[-3:]],
             "chapter_title": chapter_title,
         })
@@ -676,12 +676,12 @@ async def get_session_detail(session_id: str):
 # ==================== 日记/群聊/总结 ====================
 @app.get("/api/courses/{course_id}/diaries")
 async def get_diaries(course_id: str):
-    return {"diaries": db.get_diaries(course_id)}
+    return {"diaries": _utc_list(db.get_diaries(course_id), "created_at")}
 
 
 @app.get("/api/courses/{course_id}/summaries")
 async def get_summaries(course_id: str):
-    return {"summaries": db.get_summaries(course_id)}
+    return {"summaries": _utc_list(db.get_summaries(course_id), "created_at")}
 
 
 @app.get("/api/courses/{course_id}/group-chats")
@@ -692,7 +692,7 @@ async def get_group_chats(course_id: str):
     for s in sessions[:5]:
         chats = db.get_group_chats(s["id"])
         all_chats.extend(chats)
-    return {"group_chats": all_chats}
+    return {"group_chats": _utc_list(all_chats, "created_at")}
 
 
 # ==================== 结业答辩 ====================
