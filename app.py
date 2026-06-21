@@ -30,6 +30,21 @@ from chunker import extract_text, smart_chunk, generate_syllabus_items, generate
 from state_machine import DialogueStateMachine
 from llm_client import llm
 
+def _utc(dt):
+    return (dt + 'Z') if dt else dt
+
+def _utc_dict(d, field):
+    if not d:
+        return d
+    r = dict(d)
+    if field in r and r[field]:
+        r[field] = _utc(r[field])
+    return r
+
+def _utc_list(items, field):
+    return [_utc_dict(item, field) for item in items] if items else []
+
+
 # ==================== 初始化 ====================
 app = FastAPI(title="问渠（Wenqu）v1.1", version="1.1.0")
 
@@ -146,9 +161,9 @@ async def get_course(course_id: str):
     profile = db.get_profile(course_id)
     affinities = db.get_all_affinities(course_id)
     certificates = db.get_certificates(course_id)
-    diaries = db.get_diaries(course_id)
-    summaries = db.get_summaries(course_id)
-    sessions = db.get_sessions(course_id)
+    diaries = _utc_list(db.get_diaries(course_id), "created_at")
+    summaries = _utc_list(db.get_summaries(course_id), "created_at")
+    sessions = _utc_list(db.get_sessions(course_id), "started_at")
     stats = db.get_course_learning_stats(course_id)
 
     # ?????????????
@@ -156,15 +171,16 @@ async def get_course(course_id: str):
     for s in sessions:
         chats = db.get_group_chats(s["id"])
         all_group_chats.extend(chats)
+    all_group_chats = _utc_list(all_group_chats, "created_at")
 
     return {
-        "course": course,
-        "chapters": chapters,
+        "course": _utc_dict(course, "created_at"),
+        "chapters": _utc_list(chapters, "created_at"),
         "syllabus": syllabus,
         "progress": progress,
         "profile": profile,
         "affinities": affinities,
-        "certificates": certificates,
+        "certificates": _utc_list(certificates, "issued_at"),
         "diaries": diaries,
         "summaries": summaries,
         "group_chats": all_group_chats,
@@ -587,7 +603,7 @@ async def get_session_detail(session_id: str):
         row = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
         if not row:
             raise HTTPException(404, "会话不存在")
-        session = dict(row)
+        session = _utc_dict(dict(row), "started_at")
     finally:
         conn.close()
 
@@ -649,9 +665,9 @@ async def get_session_detail(session_id: str):
         },
         "messages": dialogue_messages,
         "outputs": {
-            "diaries": diaries[:3] if diaries else [],
-            "summaries": summaries[:2] if summaries else [],
-            "group_chats": group_chats[:5] if group_chats else [],
+            "diaries": _utc_list(diaries, "created_at")[:3] if diaries else [],
+            "summaries": _utc_list(summaries, "created_at")[:2] if summaries else [],
+            "group_chats": _utc_list(group_chats, "created_at")[:5] if group_chats else [],
             "annotations": annotations[:10] if annotations else [],
         },
     }
