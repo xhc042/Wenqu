@@ -1042,7 +1042,7 @@ function renderPostClass(data) {
                     <div style="font-size:13px;font-weight:500">📋 复习总结</div>
                     <div style="font-size:11px;color:#b2bec3;white-space:nowrap">${fmtTime(s.created_at)}</div>
                 </div>
-                <div style="font-size:13px;white-space:pre-wrap">${s.content.slice(0, 500)}</div>
+                <div style="font-size:13px;white-space:pre-wrap">${s.content}</div>
             </div>`
         ).join('');
     } else {
