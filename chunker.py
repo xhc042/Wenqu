@@ -1,4 +1,4 @@
-"""
+﻿"""
 问渠（Wenqu）v1.1 三级回退分章引擎
 
 支持PDF/EPUB/MD/TXT/URL文本提取和智能分章
@@ -34,16 +34,46 @@ async def extract_text_from_pdf(file_path: str) -> str:
 
 
 async def extract_text_from_epub(file_path: str) -> str:
-    """从EPUB提取文本"""
+    """从EPUB提取文本，保留HTML结构以便更好分章"""
+    import zipfile
+    import re as _re
     try:
-        from epub2txt import epub2txt
-        text = epub2txt(file_path)
-        return text
-    except ImportError:
-        return "⚠️ EPUB解析库未安装。请安装epub2txt。"
+        with zipfile.ZipFile(file_path, 'r') as z:
+            texts = []
+            html_files = sorted([
+                n for n in z.namelist()
+                if n.endswith(('.xhtml', '.html'))
+                and 'nav' not in n.lower()
+                and 'toc' not in n.lower()
+                and 'cover' not in n.lower()
+            ])
+            for hf in html_files:
+                try:
+                    content = z.read(hf).decode('utf-8', errors='ignore')
+                    content = _re.sub(r'<br\s*/?>', '\n', content)
+                    content = _re.sub(r'</?p[^>]*>', '\n', content)
+                    content = _re.sub(r'</?h[1-6][^>]*>', '\n### ', content)
+                    content = _re.sub(r'<li[^>]*>', '\n- ', content)
+                    content = _re.sub(r'</?li[^>]*>', '', content)
+                    content = _re.sub(r'</?ul[^>]*>|</?ol[^>]*>', '', content)
+                    content = _re.sub(r'<[^>]+>', '', content)
+                    entities = {
+                        '&amp;': '&', '&lt;': '<', '&gt;': '>',
+                        '&quot;': '"', '&#39;': "'", '&apos;': "'",
+                        '&nbsp;': ' ', '&ndash;': '-', '&mdash;': '—',
+                    }
+                    for k, v in entities.items():
+                        content = content.replace(k, v)
+                    text = _re.sub(r'\n{3,}', '\n\n', content).strip()
+                    if text:
+                        texts.append(text)
+                except Exception:
+                    continue
+            if texts:
+                return '\n\n---\n\n'.join(texts)
+            return "⚠️ EPUB中未找到有效内容"
     except Exception as e:
         return f"⚠️ EPUB解析失败：{str(e)}"
-
 
 async def extract_text_from_md(file_path: str) -> str:
     """从Markdown文件读取"""
