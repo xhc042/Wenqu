@@ -151,12 +151,11 @@ async def get_course(course_id: str):
     sessions = db.get_sessions(course_id)
     stats = db.get_course_learning_stats(course_id)
 
-    # 获取最新会话的群聊
-    latest_group_chats = []
-    for s in sessions[:3]:
+    # ?????????????
+    all_group_chats = []
+    for s in sessions:
         chats = db.get_group_chats(s["id"])
-        latest_group_chats.extend(chats)
-    latest_group_chats = latest_group_chats[:10]
+        all_group_chats.extend(chats)
 
     return {
         "course": course,
@@ -168,7 +167,7 @@ async def get_course(course_id: str):
         "certificates": certificates,
         "diaries": diaries,
         "summaries": summaries,
-        "group_chats": latest_group_chats,
+        "group_chats": all_group_chats,
         "sessions_count": len(sessions),
         "learning_stats": stats,
     }
