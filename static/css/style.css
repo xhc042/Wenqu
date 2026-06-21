@@ -953,3 +953,8 @@ body {
     margin-top: 10px;
     text-align: right;
 }
+
+/* ==================== 知识点弹窗 ==================== */
+#syllabus-list-modal::-webkit-scrollbar { width: 6px; }
+#syllabus-list-modal::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.1); border-radius: 4px; }
+#syllabus-list-modal::-webkit-scrollbar-track { background: transparent; }

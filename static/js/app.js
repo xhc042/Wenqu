@@ -1,8 +1,9 @@
 /**
  * 问渠（Wenqu）v1.1 前端应用逻辑
- * 单页应用（SPA）主控制�? */
+ * 单页应用（SPA）主控制器
+ */
 
-// ==================== 状态管�?====================
+// ==================== 状态管理 ====================
 const AppState = {
     currentView: 'dashboard',
     currentCourseId: null,
@@ -82,7 +83,7 @@ function switchView(viewName) {
     if (navBtn) navBtn.classList.add('active');
 }
 
-// ==================== 侧边�?====================
+// ==================== 侧边栏 ====================
 async function loadCourseList() {
     try {
         const courses = await API.get('/api/courses');
@@ -102,7 +103,7 @@ async function loadCourseList() {
             card.className = `course-card ${c.id === AppState.currentCourseId ? 'active' : ''}`;
             card.innerHTML = `
                 <div class="course-title">${c.title}</div>
-                <div class="course-meta">${c.source_type} · �?{c.total_chapters || '?'}�?/div>
+                <div class="course-meta">${c.source_type} · 共${c.total_chapters || '?'}章</div>
                 <div class="progress-mini"><div class="progress-mini-bar" style="width:${progress.percent}%"></div></div>
             `;
             card.onclick = () => openCourse(c.id);
@@ -113,7 +114,7 @@ async function loadCourseList() {
     }
 }
 
-// ==================== 仪表�?====================
+// ==================== 仪表盘 ====================
 async function loadDashboard() {
     try {
         const courses = await API.get('/api/courses');
@@ -133,13 +134,14 @@ async function loadDashboard() {
         document.getElementById('stat-completed').textContent = totalCompleted;
         document.getElementById('stat-heat-total').textContent = heatData.data.reduce((s, d) => s + d.count, 0);
 
-        // 渲染热力�?        renderHeatmap(heatData.data, year);
+        // 渲染热力图
+        renderHeatmap(heatData.data, year);
 
         // 课程列表
         const recentList = document.getElementById('recent-courses');
         recentList.innerHTML = '';
         if (courses.length === 0) {
-            recentList.innerHTML = '<div class="empty-state"><div class="empty-icon">📚</div><h3>还没有课�?/h3><p>点击上方"创建课程"开始你的学习之�?/p></div>';
+            recentList.innerHTML = '<div class="empty-state"><div class="empty-icon">📚</div><h3>还没有课程</h3><p>点击上方"创建课程"开始你的学习之旅</p></div>';
         } else {
             courses.slice(0, 5).forEach(c => {
                 const p = c.progress || { percent: 0 };
@@ -159,7 +161,7 @@ async function loadDashboard() {
             });
         }
     } catch (e) {
-        console.error('加载仪表盘失�?, e);
+        console.error('加载仪表盘失败', e);
     }
 }
 
@@ -173,18 +175,22 @@ function renderHeatmap(data, year) {
     const countMap = {};
     data.forEach(d => { countMap[d.date] = d.count; });
 
-    // 获取该年第一天和最后一�?    const start = new Date(year, 0, 1);
+    // 获取该年第一天和最后一天
+    const start = new Date(year, 0, 1);
     const end = new Date(year, 11, 31);
 
-    // 计算周偏�?    const dayOfWeek = start.getDay();
-    // 填充空白（第一天之前的空单元格�?    for (let i = 0; i < dayOfWeek; i++) {
+    // 计算周偏移
+    const dayOfWeek = start.getDay();
+    // 填充空白（第一天之前的空单元格）
+    for (let i = 0; i < dayOfWeek; i++) {
         const cell = document.createElement('div');
         cell.className = 'heatmap-cell level-0';
         cell.style.background = 'transparent';
         grid.appendChild(cell);
     }
 
-    // 遍历每一�?    const current = new Date(start);
+    // 遍历每一天
+    const current = new Date(start);
     while (current <= end) {
         const dateStr = current.toISOString().split('T')[0];
         const count = countMap[dateStr] || 0;
@@ -213,8 +219,9 @@ async function loadDailySummary(dateStr) {
         const div = document.getElementById('daily-summary');
         div.style.display = 'block';
         const events = data.events || {};
-        const courseNames = (data.courses || []).map(c => c.title).join('�?);
-        div.innerHTML = `<strong>${dateStr}</strong>：共 ${data.total} 次学习活�?            ${courseNames ? `�?{courseNames}）` : ''}
+        const courseNames = (data.courses || []).map(c => c.title).join('、');
+        div.innerHTML = `<strong>${dateStr}</strong>：共 ${data.total} 次学习活动
+            ${courseNames ? `（${courseNames}）` : ''}
             ${events.login ? `·登录${events.login}次` : ''}
             ${events.dialogue_round ? `·对话${events.dialogue_round}轮` : ''}
             ${events.annotation_ask ? `·划词${events.annotation_ask}次` : ''}
@@ -278,7 +285,7 @@ async function submitCreateCourse() {
     const title = document.getElementById('course-title-input').value.trim();
     const mode = document.getElementById('upload-type').value;
 
-    if (!title) { showToast('请输入课程名�?, 'error'); return; }
+    if (!title) { showToast('请输入课程名称', 'error'); return; }
 
     try {
         let sourceType = mode;
@@ -292,7 +299,7 @@ async function submitCreateCourse() {
                 sourcePath = result.file_path;
                 sourceType = result.source_type;
             }
-            if (!sourcePath) { showToast('请上传文�?, 'error'); return; }
+            if (!sourcePath) { showToast('请上传文件', 'error'); return; }
         } else if (mode === 'url') {
             sourcePath = document.getElementById('url-input').value.trim();
             sourceType = 'url';
@@ -300,7 +307,7 @@ async function submitCreateCourse() {
         } else if (mode === 'text') {
             sourcePath = document.getElementById('text-content').value.trim();
             sourceType = 'text';
-            if (!sourcePath) { showToast('请粘贴文本内�?, 'error'); return; }
+            if (!sourcePath) { showToast('请粘贴文本内容', 'error'); return; }
         } else if (mode === 'recommend') {
             sourceType = 'recommendation';
         }
@@ -312,7 +319,7 @@ async function submitCreateCourse() {
             content_text: mode === 'text' ? document.getElementById('text-content').value : '',
         });
 
-        showToast('课程创建成功�?, 'success');
+        showToast('课程创建成功！', 'success');
         await loadCourseList();
 
         // 如果有内容，自动分章
@@ -321,7 +328,7 @@ async function submitCreateCourse() {
             try {
                 await API.post(`/api/courses/${course.course_id}/chapters/generate`, {});
                 await API.post(`/api/courses/${course.course_id}/syllabus/generate`, {});
-                showToast('分章完成�?, 'success');
+                showToast('分章完成！', 'success');
             } catch (e) {
                 showToast('分章失败，请稍后重试', 'error');
             }
@@ -349,7 +356,7 @@ async function openCourse(courseId) {
     try {
         const data = await API.get(`/api/courses/${courseId}`);
         const course = data.course;
-        if (!course) { showToast('课程不存�?, 'error'); return; }
+        if (!course) { showToast('课程不存在', 'error'); return; }
 
         // 更新header
         const sessionCount = data.sessions_count || 0;
@@ -358,7 +365,7 @@ async function openCourse(courseId) {
         const currentTeacherInfo = currentTeacherId && AppState.roles ? AppState.roles[currentTeacherId] : null;
         const teacherDisplay = currentTeacherInfo
             ? `${currentTeacherInfo.emoji} ${currentTeacherInfo.name}`
-            : '未设�?;
+            : '未设置';
         const mins = stats.total_minutes || 0;
         const hrs = Math.floor(mins / 60);
         const remainMins = mins % 60;
@@ -371,24 +378,25 @@ async function openCourse(courseId) {
                 <div>
                     <div class="course-title">${course.title}</div>
                     <div class="course-source">${course.source_type} · ${new Date(course.created_at).toLocaleDateString()}
-                        · <span style="color:var(--accent);font-weight:500">已学�?${sessionCount} �?/span>
+                        · <span style="color:var(--accent);font-weight:500">已学习 ${sessionCount} 次</span>
                     </div>
                     <div style="display:flex;gap:16px;margin-top:8px;font-size:13px;color:var(--text-secondary)">
-                        <span>🧑‍�?教师�?strong>${teacherDisplay}</strong></span>
-                        <span>�?时长�?strong>${timeStr}</strong></span>
-                        <span>🔤 Token�?strong>${tokensStr}</strong></span>
+                        <span>🧑‍🏫 教师：<strong>${teacherDisplay}</strong></span>
+                        <span>⏱ 时长：<strong>${timeStr}</strong></span>
+                        <span>🔤 Token：<strong>${tokensStr}</strong></span>
                     </div>
                 </div>
                 <div style="display:flex;gap:8px">
                     <button class="btn btn-outline btn-sm" onclick="showContractModal()">📋 学习契约</button>
-                    <button class="btn btn-outline btn-sm" onclick="showSlidersModal()">🎛�?风格调控</button>
+                    <button class="btn btn-outline btn-sm" onclick="showSlidersModal()">🎛️ 风格调控</button>
                     <button class="btn btn-outline btn-sm" onclick="showSettingsModal()">⚙️ 设置</button>
-                    <button class="btn btn-danger btn-sm" onclick="deleteCurrentCourse()">🗑�?/button>
+                    <button class="btn btn-danger btn-sm" onclick="deleteCurrentCourse()">🗑️</button>
                 </div>
             </div>
         `;
 
-        // 进度�?        const progress = data.progress || { total: 0, mastered: 0, percent: 0 };
+        // 进度条
+        const progress = data.progress || { total: 0, mastered: 0, percent: 0 };
         document.getElementById('course-progress').innerHTML = `
             <div class="progress-bar-container">
                 <div style="display:flex;justify-content:space-between;margin-bottom:8px">
@@ -405,7 +413,7 @@ async function openCourse(courseId) {
         const defenseBanner = document.getElementById('defense-banner');
         if (progress.total > 0 && progress.percent === 100) {
             defenseBanner.classList.add('show');
-            defenseBanner.innerHTML = `<h2>🎓 恭喜！所有掌握项已完�?/h2>
+            defenseBanner.innerHTML = `<h2>🎓 恭喜！所有掌握项已完成</h2>
                 <p>准备好接受结业答辩了吗？</p>
                 <button class="btn btn-primary" onclick="startDefense()" style="margin-top:12px">🎓 申请结业答辩</button>`;
         } else {
@@ -415,7 +423,8 @@ async function openCourse(courseId) {
         // 章节列表
         renderChapters(data.chapters || [], data.syllabus || []);
 
-        // 课后产出�?        renderPostClass(data);
+        // 课后产出物
+        renderPostClass(data);
 
         // 证书
         renderCertificates(data.certificates || []);
@@ -449,13 +458,13 @@ function renderChapters(chapters, syllabus) {
             <div class="chapter-info">
                 <div class="chapter-title">${ch.title}</div>
                 <div class="chapter-items-count">
-                    ${total > 0 ? `${mastered}/${total} 项掌握` : '暂无掌握�?}
+                    ${total > 0 ? `${mastered}/${total} 项掌握` : '暂无掌握项'}
                     <span style="margin-left:8px">
-                        ${chapterSyllabus.map(s => `<span class="tag tag-${s.status === 'mastered' ? 'mastered' : s.status === 'in_progress' ? 'progress' : 'pending'}" style="margin:0 2px">${s.description.slice(0, 60)}</span>`).join(' ')}
+                        ${chapterSyllabus.map(s => `<span class="tag tag-${s.status === 'mastered' ? 'mastered' : s.status === 'in_progress' ? 'progress' : 'pending'}" style="margin:0 2px">${s.description.slice(0, 20)}...</span>`).join(' ')}
                     </span>
                 </div>
             </div>
-            <button class="btn btn-primary btn-sm" onclick="startChat(${ch.idx})">开始学�?/button>
+            <button class="btn btn-primary btn-sm" onclick="startChat(${ch.idx})">开始学习</button>
         `;
         list.appendChild(div);
     });
@@ -475,8 +484,8 @@ function renderRoleCard(role, roleId, recommended, currentTeacherId) {
     const isCurrent = currentTeacherId && roleId === currentTeacherId;
     const selectedClass = isCurrent ? 'selected' : (isRec ? 'selected' : '');
     return `<div class="role-card-wide ${selectedClass}" data-role-id="${roleId}">
-        ${isRec && !isCurrent ? '<div class="recommend-badge">�?推荐</div>' : ''}
-        ${isCurrent ? '<div class="recommend-badge" style="background:var(--accent)">�?当前教师</div>' : ''}
+        ${isRec && !isCurrent ? '<div class="recommend-badge">⭐ 推荐</div>' : ''}
+        ${isCurrent ? '<div class="recommend-badge" style="background:var(--accent)">✅ 当前教师</div>' : ''}
         <div class="role-header">
             <div class="role-emoji">${role.emoji || '🎓'}</div>
             <div class="role-name-group">
@@ -490,7 +499,7 @@ function renderRoleCard(role, roleId, recommended, currentTeacherId) {
             ${(role.tags || []).map(t => `<span class="role-tag">${t}</span>`).join('')}
         </div>
         <div class="role-actions">
-            <button class="btn btn-primary btn-sm select-role-btn" data-role-id="${roleId}">选择此教�?/button>
+            <button class="btn btn-primary btn-sm select-role-btn" data-role-id="${roleId}">选择此教师</button>
             <button class="btn btn-outline btn-sm view-role-btn" data-role-id="${roleId}">查看详情</button>
         </div>
     </div>`;
@@ -502,7 +511,8 @@ async function loadRolesForContract() {
         AppState.roles = roles;
         const grid = document.getElementById('contract-role-grid');
         grid.innerHTML = '';
-        // 获取当前教师和推�?        let recommended = [];
+        // 获取当前教师和推荐
+        let recommended = [];
         let currentTeacherId = null;
         if (AppState.currentCourseId) {
             try {
@@ -513,7 +523,7 @@ async function loadRolesForContract() {
                 recommended = rec.recommended || [];
             } catch(e) {}
         }
-        // 排序：当前教�?> 推荐 > 其他
+        // 排序：当前教师 > 推荐 > 其他
         const entries = Object.entries(roles);
         entries.sort(([a], [b]) => {
             const aCur = a === currentTeacherId ? -1 : 0;
@@ -555,7 +565,7 @@ async function loadRolesForContract() {
 async function viewRoleDetail(roleId) {
     const modal = document.getElementById('role-detail-modal');
     const content = document.getElementById('role-detail-content');
-    content.innerHTML = '<div style="text-align:center;padding:20px;color:#636e72">加载�?..</div>';
+    content.innerHTML = '<div style="text-align:center;padding:20px;color:#636e72">加载中...</div>';
     modal.classList.add('active');
 
     try {
@@ -567,23 +577,23 @@ async function viewRoleDetail(roleId) {
                     <div class="role-name">${role.name}</div>
                     <div class="role-style">${role.style || ''}</div>
                 </div>
-                <button class="btn btn-outline btn-sm" onclick="closeRoleDetailModal()" style="margin-left:auto">�?/button>
+                <button class="btn btn-outline btn-sm" onclick="closeRoleDetailModal()" style="margin-left:auto">✕</button>
             </div>
             <div class="role-detail-section">
-                <h4>🧑‍�?性格标签</h4>
-                <p>${role.personality || '�?}</p>
+                <h4>🧑‍🏫 性格标签</h4>
+                <p>${role.personality || '无'}</p>
             </div>
             <div class="role-detail-section">
-                <h4>🎯 最佳场�?/h4>
-                <p>${role.best_for || '�?}</p>
+                <h4>🎯 最佳场景</h4>
+                <p>${role.best_for || '无'}</p>
             </div>
             <div class="role-detail-section">
-                <h4>🏷�?标签</h4>
+                <h4>🏷️ 标签</h4>
                 <div class="role-tags">${(role.tags || []).map(t => `<span class="role-tag">${t}</span>`).join('')}</div>
             </div>
             <div class="role-detail-section">
-                <h4>📜 完整提示�?/h4>
-                <div class="prompt-box">${escapeHtml(role.prompt || '暂无提示�?)}</div>
+                <h4>📜 完整提示词</h4>
+                <div class="prompt-box">${escapeHtml(role.prompt || '暂无提示词')}</div>
             </div>
         `;
     } catch (e) {
@@ -610,7 +620,7 @@ async function confirmContract() {
     const selectedDepth = document.querySelector('.depth-btn.selected');
     const selectedDuration = document.querySelector('.duration-btn.selected');
 
-    if (!selectedRole) { showToast('请选择一位教�?, 'error'); return; }
+    if (!selectedRole) { showToast('请选择一位教师', 'error'); return; }
     if (!selectedDepth) { showToast('请选择认知深度', 'error'); return; }
     if (!selectedDuration) { showToast('请选择学习时长', 'error'); return; }
 
@@ -636,7 +646,8 @@ function showSlidersModal() {
     const modal = document.getElementById('sliders-modal');
     modal.classList.add('active');
 
-    // 加载当前角色的滑块�?    if (AppState.currentCourseId) {
+    // 加载当前角色的滑块值
+    if (AppState.currentCourseId) {
         // 从角色列表中选第一个或当前教师
         const roleSelect = document.getElementById('slider-role-select');
         if (roleSelect.options.length === 0) {
@@ -695,7 +706,8 @@ async function startChat(chapterIndex) {
     const depth = course.course.current_depth || 'standard';
     AppState.currentTeacherId = teacherId;
 
-    // 确保角色信息已加�?    if (!AppState.roles || Object.keys(AppState.roles).length === 0) {
+    // 确保角色信息已加载
+    if (!AppState.roles || Object.keys(AppState.roles).length === 0) {
         AppState.roles = await API.get('/api/roles');
     }
 
@@ -729,7 +741,7 @@ function connectWebSocket(sessionId) {
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
-        document.getElementById('chat-status').textContent = '已连�?;
+        document.getElementById('chat-status').textContent = '已连接';
         AppState.isChatting = true;
     };
 
@@ -760,9 +772,11 @@ function connectWebSocket(sessionId) {
             document.getElementById('send-btn').disabled = true;
             AppState.isChatting = false;
             showToast('本节课学习结束！正在生成学习记录...', 'success');
-            // 等待课后闭环完成后刷新数�?            setTimeout(async () => {
+            // 等待课后闭环完成后刷新数据
+            setTimeout(async () => {
                 await openCourse(AppState.currentCourseId);
-                // 切换到课后产出物标签，显示最新内�?                showToast('学习记录已生成！', 'success');
+                // 切换到课后产出物标签，显示最新内容
+                showToast('学习记录已生成！', 'success');
             }, 3000);
         }
     };
@@ -835,7 +849,8 @@ function sendChatMessage() {
 
     if (!text || !AppState.ws || AppState.ws.readyState !== WebSocket.OPEN) return;
 
-    // 添加用户消息到界�?    const container = document.getElementById('chat-messages');
+    // 添加用户消息到界面
+    const container = document.getElementById('chat-messages');
     const userDiv = document.createElement('div');
     userDiv.className = 'message';
     userDiv.innerHTML = `
@@ -855,14 +870,14 @@ function sendChatMessage() {
     input.value = '';
     input.disabled = true;
     document.getElementById('send-btn').disabled = true;
-    document.getElementById('chat-status').textContent = 'AI正在思�?..';
+    document.getElementById('chat-status').textContent = 'AI正在思考...';
 }
 
 function endChat() {
     if (AppState.ws && AppState.ws.readyState === WebSocket.OPEN) {
         AppState.ws.send(JSON.stringify({ action: 'end' }));
     }
-    showToast('对话已结�?);
+    showToast('对话已结束');
 }
 
 function escapeHtml(text) {
@@ -935,7 +950,7 @@ async function sendAnnotation() {
     const question = input.value.trim();
     const quotedText = document.getElementById('drawer-quote').dataset.quoted;
 
-    if (!question) { showToast('请输入问�?, 'error'); return; }
+    if (!question) { showToast('请输入问题', 'error'); return; }
 
     try {
         const result = await API.post('/api/annotate', {
@@ -950,18 +965,18 @@ async function sendAnnotation() {
         const div = document.createElement('div');
         div.style.cssText = 'margin-bottom:12px;padding:8px;background:#f8f9fa;border-radius:8px';
         div.innerHTML = `
-            <div style="font-size:12px;color:#636e72;margin-bottom:4px">�?${escapeHtml(question)}</div>
+            <div style="font-size:12px;color:#636e72;margin-bottom:4px">❓ ${escapeHtml(question)}</div>
             <div style="font-size:13px">💡 ${escapeHtml(result.answer)}</div>
         `;
         history.appendChild(div);
         input.value = '';
-        showToast('已回�?, 'success');
+        showToast('已回答', 'success');
     } catch (e) {
         showToast('提问失败', 'error');
     }
 }
 
-// ==================== 课后产出�?====================
+// ==================== 课后产出物 ====================
 function renderPostClass(data) {
     const diaries = data.diaries || [];
     const summaries = data.summaries || [];
@@ -973,13 +988,14 @@ function renderPostClass(data) {
     const profileDiv = document.getElementById('post-profile');
     if (profile) {
         profileDiv.innerHTML = `
-            <div style="margin-bottom:8px"><strong>💪 强项�?/strong> ${(profile.strengths || []).join('�?) || '暂无'}</div>
-            <div style="margin-bottom:8px"><strong>📉 弱项�?/strong> ${(profile.weaknesses || []).join('�?) || '暂无'}</div>
-            <div style="margin-bottom:8px"><strong>�?误解�?/strong> ${(profile.misunderstandings || []).join('�?) || '暂无'}</div>
+            <div style="margin-bottom:8px"><strong>💪 强项：</strong> ${(profile.strengths || []).join('、') || '暂无'}</div>
+            <div style="margin-bottom:8px"><strong>📉 弱项：</strong> ${(profile.weaknesses || []).join('、') || '暂无'}</div>
+            <div style="margin-bottom:8px"><strong>❌ 误解：</strong> ${(profile.misunderstandings || []).join('、') || '暂无'}</div>
         `;
     }
 
-    // 情感�?    const affDiv = document.getElementById('post-affinities');
+    // 情感分
+    const affDiv = document.getElementById('post-affinities');
     if (affinities.length > 0) {
         const roles = AppState.roles;
         affDiv.innerHTML = affinities.map(a => {
@@ -1042,7 +1058,7 @@ function renderPostClass(data) {
                     <div style="font-size:13px;font-weight:500">📋 复习总结</div>
                     <div style="font-size:11px;color:#b2bec3;white-space:nowrap">${fmtTime(s.created_at)}</div>
                 </div>
-                <div style="font-size:13px;white-space:pre-wrap">${s.content}</div>
+                <div style="font-size:13px;white-space:pre-wrap">${s.content.slice(0, 500)}</div>
             </div>`
         ).join('');
     } else {
@@ -1050,7 +1066,8 @@ function renderPostClass(data) {
     }
 }
 
-// 切换课后产出物标�?function switchPostTab(tab) {
+// 切换课后产出物标签
+function switchPostTab(tab) {
     document.querySelectorAll('.post-class-tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.post-class-content').forEach(c => c.classList.remove('active'));
     document.querySelector(`.post-class-tab[data-tab="${tab}"]`).classList.add('active');
@@ -1077,7 +1094,8 @@ async function loadLearningHistory() {
             return;
         }
 
-        // 汇总统�?        const stats = cd.learning_stats || {};
+        // 汇总统计
+        const stats = cd.learning_stats || {};
         const totalSessions = history.length;
         const totalMsg = history.reduce((s, h) => s + h.message_count, 0);
         const totalRounds = history.reduce((s, h) => s + (h.session.total_rounds || 0), 0);
@@ -1107,7 +1125,7 @@ async function loadLearningHistory() {
             </div>
             <div style="background:var(--bg-secondary);border-radius:var(--radius-sm);padding:14px;text-align:center;box-shadow:var(--shadow)">
                 <div style="font-size:24px;font-weight:700;color:var(--accent)">${tokensStr}</div>
-                <div style="font-size:12px;color:#636e72">Token消�?/div>
+                <div style="font-size:12px;color:#636e72">Token消耗</div>
             </div>
             <div style="background:var(--bg-secondary);border-radius:var(--radius-sm);padding:14px;text-align:center;box-shadow:var(--shadow)">
                 <div style="font-size:24px;font-weight:700;color:var(--success)">${masteredCount}/${totalCount}</div>
@@ -1127,19 +1145,19 @@ async function loadLearningHistory() {
                 <div class="fade-in" style="background:var(--bg-secondary);border-radius:var(--radius-sm);padding:16px;margin-bottom:16px;border-left:3px solid ${allPassed ? 'var(--success)' : 'var(--danger)'};box-shadow:var(--shadow)">
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
                         <span style="font-weight:600">${allPassed ? '🎉 答辩通过' : '😅 答辩未通过'}</span>
-                        <span style="font-size:12px;color:#636e72">${new Date(dr.created_at).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})} · ${qs.length}�?${allPassed ? '✅全�? : `�?{passCount} �?{failCount}`}</span>
+                        <span style="font-size:12px;color:#636e72">${new Date(dr.created_at).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})} · ${qs.length}题 ${allPassed ? '✅全过' : `✅${passCount} ❌${failCount}`}</span>
                     </div>
                     ${qs.map((q, qi) => {
                         const passed = q.verdict === 'PASS';
                         return `
                         <div style="background:var(--bg-primary);border-radius:8px;padding:12px;margin-bottom:8px;border-left:3px solid ${passed ? 'var(--success)' : 'var(--danger)'}">
                             <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
-                                <div style="font-weight:500;font-size:13px">�?{qi+1}�?/div>
+                                <div style="font-weight:500;font-size:13px">第${qi+1}题</div>
                                 <span style="font-size:12px;padding:1px 8px;border-radius:4px;background:${passed ? 'rgba(0,184,148,0.1)' : 'rgba(225,112,85,0.1)'};color:${passed ? 'var(--success)' : 'var(--danger)'}">${passed ? 'PASS' : 'FAIL'}</span>
                             </div>
                             <div style="font-size:13px;margin-bottom:6px">${q.question || ''}</div>
-                            <div style="font-size:12px;color:#636e72;margin-bottom:4px">💬 你的回答�?{q.answer || '（未作答�?}</div>
-                            ${q.comment ? `<div style="font-size:12px;color:#636e72">📝 评语�?{q.comment}</div>` : ''}
+                            <div style="font-size:12px;color:#636e72;margin-bottom:4px">💬 你的回答：${q.answer || '（未作答）'}</div>
+                            ${q.comment ? `<div style="font-size:12px;color:#636e72">📝 评语：${q.comment}</div>` : ''}
                             ${!passed && q.reference_answer ? `<div style="font-size:12px;color:var(--accent);margin-top:4px;padding:6px 8px;background:rgba(108,92,231,0.06);border-radius:4px">💡 参考答案：${q.reference_answer}</div>` : ''}
                         </div>`;
                     }).join('')}
@@ -1154,10 +1172,11 @@ async function loadLearningHistory() {
             const date = s.ended_at ? fmtTime(s.ended_at) : (s.started_at ? fmtTime(s.started_at) : '未知');
             const teacherName = AppState.roles[s.teacher_role_id]?.name || s.teacher_role_id;
             const teacherEmoji = AppState.roles[s.teacher_role_id]?.emoji || '🎓';
-            const chapterTitle = h.chapter_title || `�?{s.chapter_index + 1}章`;
+            const chapterTitle = h.chapter_title || `第${s.chapter_index + 1}章`;
             const order = history.length - idx;
 
-            // 产出�?            let outputsHtml = '';
+            // 产出物
+            let outputsHtml = '';
             if (h.diaries && h.diaries.length > 0) {
                 outputsHtml += h.diaries.map(d => `<div style="margin:4px 0;font-size:12px">📝 <strong>${d.title}</strong> <span style="color:#b2bec3">${fmtTime(d.created_at)}</span></div>`).join('');
             }
@@ -1177,21 +1196,21 @@ async function loadLearningHistory() {
             return `<div class="fade-in" style="background:var(--bg-secondary);border-radius:var(--radius-sm);padding:16px;margin-bottom:12px;border-left:3px solid var(--accent);box-shadow:var(--shadow)">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
                     <div>
-                        <span style="font-size:12px;color:#b2bec3;font-weight:500">�?{order}�?/span>
+                        <span style="font-size:12px;color:#b2bec3;font-weight:500">第${order}次</span>
                         <span style="font-weight:600;margin-left:8px">${teacherEmoji} ${teacherName}</span>
                     </div>
-                    <span style="font-size:12px;color:#636e72">${date} · ${h.message_count}条消�?/span>
+                    <span style="font-size:12px;color:#636e72">${date} · ${h.message_count}条消息</span>
                 </div>
                 <div style="font-size:13px;margin-bottom:6px">
                     <span style="background:rgba(108,92,231,0.08);color:var(--accent);padding:2px 8px;border-radius:4px;font-size:12px">📖 ${chapterTitle}</span>
                 </div>
                 <div style="font-size:13px;margin-bottom:8px;color:var(--text-secondary)">
                     ${h.user_messages && h.user_messages.length > 0
-                        ? h.user_messages.map(m => `"${m}"`).join(' �?')
+                        ? h.user_messages.map(m => `"${m}"`).join(' → ')
                         : ''}
                 </div>
                 <div style="border-top:1px solid var(--border);padding-top:8px;margin-top:8px">
-                    <div style="font-size:12px;font-weight:500;color:#636e72;margin-bottom:4px">课后产出�?/div>
+                    <div style="font-size:12px;font-weight:500;color:#636e72;margin-bottom:4px">课后产出：</div>
                     ${outputsHtml}
                 </div>
             </div>`;
@@ -1262,7 +1281,7 @@ async function startDefense() {
         const container = document.getElementById('defense-questions');
         container.innerHTML = `<div style="text-align:center;padding:16px">
             <h2>🎓 结业答辩</h2>
-            <p style="color:var(--text-secondary);margin:8px 0">⏱️ 限时 ${result.time_limit_minutes} 分钟 · 📝 �?${result.questions.length} 道题</p>
+            <p style="color:var(--text-secondary);margin:8px 0">⏱️ 限时 ${result.time_limit_minutes} 分钟 · 📝 共 ${result.questions.length} 道题</p>
             <div id="defense-timer" style="font-size:24px;font-weight:700;color:var(--accent);margin:12px 0">${result.time_limit_minutes}:00</div>
         </div>`;
 
@@ -1271,9 +1290,9 @@ async function startDefense() {
             div.className = 'fade-in';
             div.style.cssText = 'background:var(--bg-secondary);border-radius:var(--radius);padding:20px;margin-bottom:16px;box-shadow:var(--shadow)';
             div.innerHTML = `
-                <div style="font-weight:600;margin-bottom:8px">�?${i + 1} �?/div>
+                <div style="font-weight:600;margin-bottom:8px">第 ${i + 1} 题</div>
                 <div style="font-size:16px;margin-bottom:12px">${q.question}</div>
-                <textarea id="defense-answer-${i}" rows="4" style="width:100%;padding:12px;border:1px solid var(--border);border-radius:var(--radius-sm);font-size:14px;font-family:inherit;resize:vertical" placeholder="请输入你的回�?.."></textarea>
+                <textarea id="defense-answer-${i}" rows="4" style="width:100%;padding:12px;border:1px solid var(--border);border-radius:var(--radius-sm);font-size:14px;font-family:inherit;resize:vertical" placeholder="请输入你的回答..."></textarea>
             `;
             container.appendChild(div);
         });
@@ -1284,7 +1303,8 @@ async function startDefense() {
         submitBtn.innerHTML = `<button class="btn btn-primary" onclick="submitDefense()" style="font-size:16px;padding:12px 32px">📮 提交答辩</button>`;
         container.appendChild(submitBtn);
 
-        // 启动计时�?        let minutes = result.time_limit_minutes;
+        // 启动计时器
+        let minutes = result.time_limit_minutes;
         let seconds = 0;
         document.body.style.userSelect = 'none';
         document.addEventListener('copy', preventCopy);
@@ -1298,7 +1318,7 @@ async function startDefense() {
             if (timer) timer.textContent = `${minutes}:${seconds.toString().padStart(2, '0')}`;
             if (minutes <= 0 && seconds <= 0) {
                 clearInterval(AppState.defenseTimer);
-                showToast('�?时间到！请提交答�?, 'error');
+                showToast('⏰ 时间到！请提交答案', 'error');
                 submitDefense();
             }
         }, 1000);
@@ -1310,7 +1330,7 @@ async function startDefense() {
 
 function preventCopy(e) {
     e.preventDefault();
-    showToast('答辩期间请闭卷作�?, 'error');
+    showToast('答辩期间请闭卷作答', 'error');
 }
 
 async function submitDefense() {
@@ -1341,33 +1361,33 @@ async function submitDefense() {
         if (result.all_passed) {
             container.innerHTML = `<div class="certificate-card">
                 <div class="cert-icon">🎓</div>
-                <h3>🎉 恭喜通过�?/h3>
+                <h3>🎉 恭喜通过！</h3>
                 ${result.certificate ? `
-                    <div class="cert-meta"><strong>课程�?/strong>${result.certificate.course_title}</div>
-                    <div class="cert-meta"><strong>教师�?/strong>${result.certificate.teacher}</div>
-                    <div class="cert-meta"><strong>学习时长�?/strong>${result.certificate.total_minutes} 分钟</div>
-                    ${result.certificate.total_tokens ? `<div class="cert-meta"><strong>Token消耗：</strong>�?${result.certificate.total_tokens >= 1000 ? (result.certificate.total_tokens/1000).toFixed(1)+'k' : result.certificate.total_tokens}</div>` : ''}
-                    <div class="cert-meta"><strong>强项�?/strong>${result.certificate.strengths}</div>
-                    <div class="cert-meta"><strong>教师寄语�?/strong>${result.certificate.teacher_comment}</div>
+                    <div class="cert-meta"><strong>课程：</strong>${result.certificate.course_title}</div>
+                    <div class="cert-meta"><strong>教师：</strong>${result.certificate.teacher}</div>
+                    <div class="cert-meta"><strong>学习时长：</strong>${result.certificate.total_minutes} 分钟</div>
+                    ${result.certificate.total_tokens ? `<div class="cert-meta"><strong>Token消耗：</strong>约 ${result.certificate.total_tokens >= 1000 ? (result.certificate.total_tokens/1000).toFixed(1)+'k' : result.certificate.total_tokens}</div>` : ''}
+                    <div class="cert-meta"><strong>强项：</strong>${result.certificate.strengths}</div>
+                    <div class="cert-meta"><strong>教师寄语：</strong>${result.certificate.teacher_comment}</div>
                     <div style="margin-top:16px;display:flex;gap:8px;justify-content:center">
                         <button class="btn btn-success" onclick="copyCertificate()">📋 复制证书</button>
-                        <button class="btn btn-primary" onclick="window.print()">🖨�?打印PDF</button>
+                        <button class="btn btn-primary" onclick="window.print()">🖨️ 打印PDF</button>
                     </div>
                 ` : ''}
             </div>`;
 
-            showToast('🎉 恭喜毕业�?, 'success');
+            showToast('🎉 恭喜毕业！', 'success');
         } else {
             container.innerHTML = `<div style="text-align:center;padding:40px">
                 <div style="font-size:48px;margin-bottom:16px">😅</div>
                 <h3>还需继续努力</h3>
-                <p style="color:var(--text-secondary);margin:8px 0">有题目未通过，请回顾薄弱章节后再来挑�?/p>
+                <p style="color:var(--text-secondary);margin:8px 0">有题目未通过，请回顾薄弱章节后再来挑战</p>
                 <button class="btn btn-primary" onclick="openCourse('${AppState.currentCourseId}')">返回课程</button>
             </div>`;
             // 显示评估结果
             result.results.forEach(r => {
                 container.innerHTML += `<div style="background:var(--bg-primary);padding:12px;border-radius:8px;margin:8px 0">
-                    �?{r.question_index + 1}�? <span style="color:${r.verdict === 'PASS' ? 'var(--success)' : 'var(--danger)'}">${r.verdict}</span> - ${r.comment}
+                    第${r.question_index + 1}题: <span style="color:${r.verdict === 'PASS' ? 'var(--success)' : 'var(--danger)'}">${r.verdict}</span> - ${r.comment}
                 </div>`;
             });
             showToast('部分题目未通过，继续加油！', 'error');
@@ -1405,8 +1425,8 @@ function renderCertificates(certificates) {
             <div class="cert-icon">🎓</div>
             <h3>${AppState.roles[c.teacher_role_id]?.name || c.teacher_role_id} · 结业证书</h3>
             <div class="cert-meta">📅 ${fmt(c.issued_at)}</div>
-            <div class="cert-meta">�?学习时长�?{timeStr}</div>
-            <div class="cert-meta">💪 强项�?{c.strengths || '待总结'}</div>
+            <div class="cert-meta">⏱ 学习时长：${timeStr}</div>
+            <div class="cert-meta">💪 强项：${c.strengths || '待总结'}</div>
         `;
         container.appendChild(div);
     });
@@ -1436,7 +1456,7 @@ async function saveSettings() {
 
     try {
         await API.post('/api/settings/llm', data);
-        showToast('设置已保�?, 'success');
+        showToast('设置已保存', 'success');
     } catch (e) {
         showToast('保存失败', 'error');
     }
@@ -1448,31 +1468,32 @@ function closeSettingsModal() {
 
 // ==================== 删除课程 ====================
 async function deleteCurrentCourse() {
-    if (!confirm('确定要删除这门课程吗？所有学习数据将丢失�?)) return;
+    if (!confirm('确定要删除这门课程吗？所有学习数据将丢失。')) return;
     try {
         await API.delete(`/api/courses/${AppState.currentCourseId}`);
         AppState.currentCourseId = null;
         await loadCourseList();
         switchView('dashboard');
-        showToast('课程已删�?, 'success');
+        showToast('课程已删除', 'success');
     } catch (e) {
         showToast('删除失败', 'error');
     }
 }
 
-// ==================== 空书架推�?====================
+// ==================== 空书架推荐 ====================
 async function searchBooks() {
     const query = document.getElementById('book-search-input').value.trim();
-    if (!query) { showToast('请输入课题名�?, 'error'); return; }
+    if (!query) { showToast('请输入课题名称', 'error'); return; }
 
     showToast('正在搜索推荐教材...');
-    // 使用LLM推荐（通过后端�?    try {
+    // 使用LLM推荐（通过后端）
+    try {
         const roles = await API.get('/api/roles');
         // 简单关键词推荐
         const recommendations = [
-            { title: `${query}（基础篇）`, author: '推荐阅读经典入门教材', channel: '各大书店/图书�? },
-            { title: `${query}（进阶篇）`, author: '适合有一定基础的读�?, channel: '大学教材/专业书籍' },
-            { title: `${query}（实践指南）`, author: '侧重实战应用', channel: '技术社�?在线课程平台' },
+            { title: `${query}（基础篇）`, author: '推荐阅读经典入门教材', channel: '各大书店/图书馆' },
+            { title: `${query}（进阶篇）`, author: '适合有一定基础的读者', channel: '大学教材/专业书籍' },
+            { title: `${query}（实践指南）`, author: '侧重实战应用', channel: '技术社区/在线课程平台' },
         ];
 
         const container = document.getElementById('recommend-results');
@@ -1480,11 +1501,11 @@ async function searchBooks() {
             <div class="fade-in" style="background:var(--bg-secondary);border-radius:var(--radius-sm);padding:16px;margin-bottom:8px;box-shadow:var(--shadow)">
                 <div style="font-weight:600;font-size:15px">📖 ${r.title}</div>
                 <div style="font-size:13px;color:#636e72;margin:4px 0">${r.author}</div>
-                <div style="font-size:12px;color:#b2bec3">获取渠道�?{r.channel}</div>
-                <button class="btn btn-sm btn-outline" style="margin-top:8px" onclick="quickCreateFromRecommend('${r.title}')">标记为想�?/button>
+                <div style="font-size:12px;color:#b2bec3">获取渠道：${r.channel}</div>
+                <button class="btn btn-sm btn-outline" style="margin-top:8px" onclick="quickCreateFromRecommend('${r.title}')">标记为想读</button>
             </div>
         `).join('');
-        showToast('推荐完成�?, 'success');
+        showToast('推荐完成！', 'success');
     } catch (e) {
         showToast('搜索失败', 'error');
     }
@@ -1497,7 +1518,7 @@ async function quickCreateFromRecommend(title) {
             source_type: 'recommendation',
             source_path: '',
         });
-        showToast('已添加到课程列表�?, 'success');
+        showToast('已添加到课程列表！', 'success');
         await loadCourseList();
         openCourse(course.course_id);
     } catch (e) {
@@ -1505,7 +1526,7 @@ async function quickCreateFromRecommend(title) {
     }
 }
 
-// ==================== 初始�?====================
+// ==================== 初始化 ====================
 document.addEventListener('DOMContentLoaded', function() {
     // 导航
     document.querySelectorAll('.nav-btn').forEach(btn => {
@@ -1533,7 +1554,8 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 
-    // 输入框自动拉�?    const chatInput = document.getElementById('chat-input');
+    // 输入框自动拉伸
+    const chatInput = document.getElementById('chat-input');
     if (chatInput) {
         chatInput.addEventListener('input', function() {
             this.style.height = 'auto';
@@ -1548,6 +1570,7 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    // 初始化加�?    loadDashboard();
+    // 初始化加载
+    loadDashboard();
     loadCourseList();
 });
