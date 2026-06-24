@@ -390,6 +390,7 @@ async function openCourse(courseId) {
                     <button class="btn btn-outline btn-sm" onclick="showContractModal()">📋 学习契约</button>
                     <button class="btn btn-outline btn-sm" onclick="showSlidersModal()">🎛️ 风格调控</button>
                     <button class="btn btn-outline btn-sm" onclick="showSettingsModal()">⚙️ 设置</button>
+                    <button class="btn btn-outline btn-sm" onclick="showAllSyllabusModal()">📋 全书知识点</button>
                     <button class="btn btn-danger btn-sm" onclick="deleteCurrentCourse()">🗑️</button>
                 </div>
             </div>
@@ -460,7 +461,10 @@ function renderChapters(chapters, syllabus) {
                 <div class="chapter-items-count">
                     ${total > 0 ? `${mastered}/${total} 项掌握` : '暂无掌握项'}
                     <span style="margin-left:8px">
-                        ${chapterSyllabus.map(s => `<span class="tag tag-${s.status === 'mastered' ? 'mastered' : s.status === 'in_progress' ? 'progress' : 'pending'}" style="margin:0 2px">${s.description.slice(0, 20)}...</span>`).join(' ')}
+                        ${chapterSyllabus.map(s => {
+                        const displayText = s.description.slice(0, 80) + (s.description.length > 80 ? '...' : '');
+                        return `<span class="tag tag-${s.status === 'mastered' ? 'mastered' : s.status === 'in_progress' ? 'progress' : 'pending'}" style="margin:0 2px;cursor:pointer" title="${s.description}" onclick="viewSyllabusDetail(${s.id}, this.title)">${displayText}</span>`;
+                    }).join(' ')}
                     </span>
                 </div>
             </div>
@@ -1058,7 +1062,7 @@ function renderPostClass(data) {
                     <div style="font-size:13px;font-weight:500">📋 复习总结</div>
                     <div style="font-size:11px;color:#b2bec3;white-space:nowrap">${fmtTime(s.created_at)}</div>
                 </div>
-                <div style="font-size:13px;white-space:pre-wrap">${s.content.slice(0, 500)}</div>
+                <div style="font-size:13px;white-space:pre-wrap">${s.content}</div>
             </div>`
         ).join('');
     } else {
@@ -1574,3 +1578,69 @@ document.addEventListener('DOMContentLoaded', function() {
     loadDashboard();
     loadCourseList();
 });
+
+// ==================== 查看全书知识点 ====================
+let allSyllabusCache = [];
+
+function showAllSyllabusModal() {
+    var modal = document.createElement('div');
+    modal.className = 'modal-overlay active';
+    modal.style.zIndex = '2000';
+    var container = document.createElement('div');
+    container.className = 'modal';
+    container.onclick = function(e) { e.stopPropagation(); };
+    container.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px"><h2>📋 全书知识点</h2><button class="btn btn-outline btn-sm" onclick="this.closest(\'.modal-overlay\').remove()">✕</button></div><div id="syllabus-list-modal" style="max-height:60vh;overflow-y:auto;padding-right:8px"></div>';
+    modal.appendChild(container);
+    document.body.appendChild(modal);
+    loadAllSyllabusData();
+}
+
+async function loadAllSyllabusData() {
+    if (!AppState.currentCourseId) return;
+    try {
+        var data = await API.get('/api/courses/' + AppState.currentCourseId);
+        var items = data.syllabus || [];
+        var el = document.getElementById('syllabus-list-modal');
+        if (!el) return;
+        if (items.length === 0) { el.innerHTML = '<div style="text-align:center;color:var(--text-secondary);padding:40px">暂无知识点</div>'; return; }
+        var chapters = data.chapters || [];
+        var chapterMap = {};
+        chapters.forEach(function(c) { chapterMap[c.idx] = c.title; });
+        el.innerHTML = items.map(function(s, idx) {
+            var chTitle = chapterMap[s.chapter_index] || '第' + (s.chapter_index + 1) + '章';
+            var st = s.status === 'mastered' ? '已掌握' : s.status === 'in_progress' ? '进行中' : '待学习';
+            var bg = s.status === 'mastered' ? 'rgba(0,184,148,0.1)' : s.status === 'in_progress' ? 'rgba(253,203,110,0.1)' : 'rgba(222,230,233,0.1)';
+            var cl = s.status === 'mastered' ? 'var(--success)' : s.status === 'in_progress' ? '#d68910' : '#636e72';
+            var bd = s.status === 'mastered' ? 'var(--success)' : s.status === 'in_progress' ? '#d68910' : '#dfe6e9';
+            return '<div style="background:var(--bg-secondary);border-radius:var(--radius-sm);padding:16px;margin-bottom:12px;border-left:3px solid var(--accent);box-shadow:var(--shadow)">' +
+                '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">' +
+                '<div><span style="font-size:12px;color:var(--accent);font-weight:500">第' + (idx + 1) + '个知识点</span>' +
+                '<span style="font-size:12px;color:#636e72;margin-left:8px">' + chTitle + '</span></div>' +
+                '<span style="font-size:11px;padding:2px 8px;border-radius:4px;background:' + bg + ';color:' + cl + ';border:1px solid ' + bd + '">' + st + '</span></div>' +
+                '<div class="syllabus-item" style="font-size:14px;color:var(--text-primary);line-height:1.6;cursor:pointer" data-id="' + s.id + '" data-desc="' + escapeHtml(s.description) + '">' +
+                escapeHtml(s.description) + '</div></div>';
+        }).join('');
+        el.querySelectorAll('.syllabus-item').forEach(function(item) {
+            item.onclick = function() {
+                viewSyllabusDetail(parseInt(item.dataset.id), item.dataset.desc);
+            };
+        });
+    } catch (e) { console.error('加载知识点失败', e); showToast('加载知识点失败', 'error'); }
+}
+
+function viewSyllabusDetail(syllabusId, description) {
+    if (!description) return;
+    var modal = document.createElement('div');
+    modal.className = 'modal-overlay active';
+    modal.style.zIndex = '2001';
+    var el = document.createElement('div');
+    el.className = 'modal';
+    el.style.maxWidth = '600px';
+    el.onclick = function(e) { e.stopPropagation(); };
+    el.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px"><h2>📖 知识点详情</h2><button class="btn btn-outline btn-sm" onclick="this.closest(\'.modal-overlay\').remove()">✕</button></div>' +
+        '<div style="font-size:16px;line-height:1.8;color:var(--text-primary);margin-bottom:24px;padding:20px;background:var(--bg-primary);border-radius:var(--radius-sm);border-left:4px solid var(--accent)">' + escapeHtml(description) + '</div>' +
+        '<div style="display:flex;justify-content:flex-end;gap:8px"><button class="btn btn-outline" onclick="this.closest(\'.modal-overlay\').remove()">关闭</button></div>';
+    modal.appendChild(el);
+    document.body.appendChild(modal);
+}
+

@@ -8,7 +8,12 @@ from pathlib import Path
 
 # 项目根目录
 BASE_DIR = Path(__file__).parent.resolve()
-DATA_DIR = BASE_DIR / "wenqu_data"
+# 数据目录：支持环境变量覆盖（PyInstaller 打包后指向 exe 同级目录，确保数据库持久化）
+_data_dir_env = os.environ.get("WENQU_DATA_DIR")
+if _data_dir_env:
+    DATA_DIR = Path(_data_dir_env)
+else:
+    DATA_DIR = BASE_DIR / "wenqu_data"
 PROMPTS_DIR = BASE_DIR / "prompts" / "roles"
 STATIC_DIR = BASE_DIR / "static"
 
