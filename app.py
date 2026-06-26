@@ -137,6 +137,10 @@ async def upload_file(file: UploadFile = File(...)):
     source_type = type_map.get(ext, "txt")
 
     # 保存文件
+    # PDF 导入暂不支持
+    if source_type == "pdf":
+        raise HTTPException(400, "暂不支持 PDF 格式导入，请使用 EPUB / MD / TXT 格式。")
+
     file_path = DATA_DIR / "uploads" / f"{uuid.uuid4().hex}{ext}"
     content = await file.read()
     async with aiofiles.open(file_path, "wb") as f:

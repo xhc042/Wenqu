@@ -20,17 +20,9 @@ from llm_client import llm
 async def extract_text_from_pdf(file_path: str) -> str:
     """从PDF提取文本"""
     try:
-        import fitz  # PyMuPDF
-        doc = fitz.open(file_path)
-        text = []
-        for page in doc:
-            text.append(page.get_text())
-        doc.close()
-        return "\n".join(text)
-    except ImportError:
-        return "⚠️ PDF解析库未安装。请安装PyMuPDF。"
+        return ""
     except Exception as e:
-        return f"⚠️ PDF解析失败：{str(e)}"
+        return f"⚠️ 暂不支持PDF导入：{str(e)}"
 
 
 async def extract_text_from_epub(file_path: str) -> str:

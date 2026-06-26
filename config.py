@@ -4,22 +4,32 @@
 
 import os
 import json
+import sys
 from pathlib import Path
 
 # 项目根目录
 BASE_DIR = Path(__file__).parent.resolve()
+
+# 资源目录（static/prompts）：PyInstaller onefile 模式下解压到 sys._MEIPASS
+if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    _RESOURCES_DIR = Path(sys._MEIPASS)
+else:
+    _RESOURCES_DIR = BASE_DIR
+
 # 数据目录：支持环境变量覆盖（PyInstaller 打包后指向 exe 同级目录，确保数据库持久化）
 _data_dir_env = os.environ.get("WENQU_DATA_DIR")
 if _data_dir_env:
     DATA_DIR = Path(_data_dir_env)
 else:
     DATA_DIR = BASE_DIR / "wenqu_data"
-PROMPTS_DIR = BASE_DIR / "prompts" / "roles"
-STATIC_DIR = BASE_DIR / "static"
+PROMPTS_DIR = _RESOURCES_DIR / "prompts" / "roles"
+STATIC_DIR = _RESOURCES_DIR / "static"
 
 # 确保数据目录存在
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
+# 打包后 prompts 目录是只读资源，不需要创建；开发模式下确保存在
+if not getattr(sys, 'frozen', False):
+    PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # 数据库路径
 DB_PATH = DATA_DIR / "wenqu.db"
