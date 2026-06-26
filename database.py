@@ -205,6 +205,27 @@ def init_db():
             UNIQUE(course_id, teacher_role_id),
             FOREIGN KEY (course_id) REFERENCES courses(id)
         );
+
+        -- LLM 提供商表
+        CREATE TABLE IF NOT EXISTS llm_providers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            base_url TEXT NOT NULL,
+            api_key TEXT NOT NULL DEFAULT '',
+            is_active INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- LLM 模型表
+        CREATE TABLE IF NOT EXISTS llm_models (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (provider_id) REFERENCES llm_providers(id) ON DELETE CASCADE,
+            UNIQUE(provider_id, name)
+        );
         """)
         conn.commit()
     finally:
@@ -892,5 +913,187 @@ def save_sliders(course_id: str, teacher_role_id: str, strictness: int, encourag
             (course_id, teacher_role_id, strictness, encouragement, verbosity),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+# ==================== LLM 提供商管理 ====================
+
+def add_llm_provider(name: str, base_url: str, api_key: str = "") -> int:
+    conn = get_conn()
+    try:
+        # 如果表为空，自动设置为激活
+        existing = conn.execute("SELECT COUNT(*) as cnt FROM llm_providers").fetchone()
+        is_active = 1 if existing["cnt"] == 0 else 0
+        cur = conn.execute(
+            "INSERT INTO llm_providers (name, base_url, api_key, is_active) VALUES (?, ?, ?, ?)",
+            (name, base_url, api_key, is_active),
+        )
+        provider_id = cur.lastrowid
+        conn.commit()
+        return provider_id
+    finally:
+        conn.close()
+
+
+def get_all_llm_providers() -> list:
+    conn = get_conn()
+    try:
+        rows = conn.execute("SELECT * FROM llm_providers ORDER BY created_at ASC").fetchall()
+        providers = [dict(r) for r in rows]
+        for p in providers:
+            p["models"] = get_llm_models(p["id"])
+        return providers
+    finally:
+        conn.close()
+
+
+def get_llm_provider(provider_id: int) -> dict:
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT * FROM llm_providers WHERE id=?", (provider_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def update_llm_provider(provider_id: int, **kwargs) -> bool:
+    allowed = {"name", "base_url", "api_key"}
+    updates = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
+    if not updates:
+        return False
+    set_clause = ", ".join(f"{k}=?" for k in updates)
+    values = list(updates.values()) + [provider_id]
+    conn = get_conn()
+    try:
+        conn.execute(f"UPDATE llm_providers SET {set_clause} WHERE id=?", values)
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def delete_llm_provider(provider_id: int) -> bool:
+    conn = get_conn()
+    try:
+        # 手动级联删除 models（SQLite 不一定自动触发）
+        conn.execute("DELETE FROM llm_models WHERE provider_id=?", (provider_id,))
+        conn.execute("DELETE FROM llm_providers WHERE id=?", (provider_id,))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def set_active_provider(provider_id: int):
+    conn = get_conn()
+    try:
+        conn.execute("UPDATE llm_providers SET is_active=0")
+        conn.execute("UPDATE llm_providers SET is_active=1 WHERE id=?", (provider_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_active_provider() -> dict:
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT * FROM llm_providers WHERE is_active=1").fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def add_llm_model(provider_id: int, name: str) -> int:
+    conn = get_conn()
+    try:
+        # 如果该 provider 下无 model，自动激活
+        existing = conn.execute(
+            "SELECT COUNT(*) as cnt FROM llm_models WHERE provider_id=?", (provider_id,)
+        ).fetchone()
+        is_active = 1 if existing["cnt"] == 0 else 0
+        cur = conn.execute(
+            "INSERT INTO llm_models (provider_id, name, is_active) VALUES (?, ?, ?)",
+            (provider_id, name, is_active),
+        )
+        model_id = cur.lastrowid
+        conn.commit()
+        return model_id
+    finally:
+        conn.close()
+
+
+def get_llm_models(provider_id: int) -> list:
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM llm_models WHERE provider_id=? ORDER BY created_at ASC",
+            (provider_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_llm_model(model_id: int) -> dict:
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT * FROM llm_models WHERE id=?", (model_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def delete_llm_model(model_id: int) -> bool:
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM llm_models WHERE id=?", (model_id,))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def update_llm_model_rename(model_id: int, name: str) -> bool:
+    conn = get_conn()
+    try:
+        conn.execute("UPDATE llm_models SET name=? WHERE id=?", (name, model_id))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def set_active_model(model_id: int):
+    conn = get_conn()
+    try:
+        conn.execute("UPDATE llm_models SET is_active=0")
+        conn.execute("UPDATE llm_models SET is_active=1 WHERE id=?", (model_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_active_model() -> dict:
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT * FROM llm_models WHERE is_active=1").fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_active_model_with_provider() -> dict:
+    """JOIN 查询获取当前激活的 provider + model 组合"""
+    conn = get_conn()
+    try:
+        row = conn.execute("""
+            SELECT p.id as provider_id, p.name as provider_name, p.base_url, p.api_key,
+                   m.id as model_id, m.name as model_name
+            FROM llm_providers p
+            JOIN llm_models m ON m.provider_id = p.id AND m.is_active = 1
+            WHERE p.is_active = 1
+        """).fetchone()
+        return dict(row) if row else None
     finally:
         conn.close()

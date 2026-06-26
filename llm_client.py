@@ -130,6 +130,44 @@ class LLMClient:
         ]
         return (await self.chat(messages, temperature=0.5, max_tokens=50)).strip()
 
+    async def test_connection(self, base_url: str, model: str, api_key: str) -> dict:
+        """测试连接，不修改单例状态"""
+        if not api_key:
+            return {"success": False, "message": "API Key 不能为空"}
+
+        body = {
+            "model": model,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 5,
+            "temperature": 0,
+        }
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            try:
+                resp = await client.post(
+                    f"{base_url.rstrip('/')}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=body,
+                )
+                if resp.status_code == 200:
+                    return {"success": True, "message": "连接成功 ✅"}
+                elif resp.status_code == 401:
+                    return {"success": False, "message": "API Key 无效 (401)"}
+                elif resp.status_code == 404:
+                    return {"success": False, "message": f"模型 '{model}' 不存在或接口地址错误 (404)"}
+                else:
+                    error_text = resp.text[:200]
+                    return {"success": False, "message": f"服务器返回错误 ({resp.status_code}): {error_text}"}
+            except httpx.TimeoutException:
+                return {"success": False, "message": "连接超时，请检查 base_url 是否正确"}
+            except httpx.ConnectError:
+                return {"success": False, "message": "无法连接服务器，请检查 base_url 或网络"}
+            except Exception as e:
+                return {"success": False, "message": f"连接失败: {str(e)[:100]}"}
+
 
 llm = LLMClient()
 

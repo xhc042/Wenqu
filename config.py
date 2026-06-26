@@ -10,6 +10,9 @@ from pathlib import Path
 # 项目根目录
 BASE_DIR = Path(__file__).parent.resolve()
 
+# 应用版本
+VERSION = "1.1.2"
+
 # 资源目录（static/prompts）：PyInstaller onefile 模式下解压到 sys._MEIPASS
 if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
     _RESOURCES_DIR = Path(sys._MEIPASS)

@@ -44,6 +44,15 @@ const API = {
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         return resp.json();
     },
+    async put(url, data) {
+        const resp = await fetch(url, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data),
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        return resp.json();
+    },
     async delete(url) {
         const resp = await fetch(url, { method: 'DELETE' });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -81,6 +90,11 @@ function switchView(viewName) {
     document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
     const navBtn = document.querySelector(`.nav-btn[data-view="${viewName}"]`);
     if (navBtn) navBtn.classList.add('active');
+
+    // 更新页面标题
+    const titles = { dashboard: '📊 仪表盘', 'create-course': '➕ 创建课程', 'course-detail': '📖 课程详情', chat: '💬 对话', defense: '🎓 结业答辩', 'model-config': '🔧 模型配置' };
+    const titleEl = document.getElementById('page-title');
+    if (titleEl && titles[viewName]) titleEl.textContent = titles[viewName];
 }
 
 // ==================== 侧边栏 ====================
@@ -389,7 +403,7 @@ async function openCourse(courseId) {
                 <div style="display:flex;gap:8px">
                     <button class="btn btn-outline btn-sm" onclick="showContractModal()">📋 学习契约</button>
                     <button class="btn btn-outline btn-sm" onclick="showSlidersModal()">🎛️ 风格调控</button>
-                    <button class="btn btn-outline btn-sm" onclick="showSettingsModal()">⚙️ 设置</button>
+                    <button class="btn btn-outline btn-sm" onclick="switchView('model-config');loadModelConfig()">🔧 模型配置</button>
                     <button class="btn btn-outline btn-sm" onclick="showAllSyllabusModal()">📋 全书知识点</button>
                     <button class="btn btn-danger btn-sm" onclick="deleteCurrentCourse()">🗑️</button>
                 </div>
@@ -1530,6 +1544,267 @@ async function quickCreateFromRecommend(title) {
     }
 }
 
+// ==================== 模型配置 ====================
+
+async function loadModelConfig() {
+    try {
+        const [providers, active] = await Promise.all([
+            API.get('/api/llm/providers'),
+            API.get('/api/llm/active'),
+        ]);
+        renderModelConfigStatus(active);
+        renderProviderList(providers, active);
+    } catch (e) {
+        console.error('加载模型配置失败', e);
+        document.getElementById('model-config-content').innerHTML = '<div class="empty-state"><p>加载失败</p></div>';
+    }
+}
+
+function renderModelConfigStatus(active) {
+    const el = document.getElementById('model-config-status');
+    if (active && active.provider && active.model) {
+        el.className = 'model-config-status active';
+        el.innerHTML = `
+            <div class="model-config-status-icon">✅</div>
+            <div class="model-config-status-text">
+                <strong>当前配置：</strong>${active.provider.name} / ${active.model.name}
+                ${active.has_api_key ? '' : ' <span style="color:#e17055">（未设置 API Key）</span>'}
+            </div>
+        `;
+    } else {
+        el.className = 'model-config-status inactive';
+        el.innerHTML = `
+            <div class="model-config-status-icon">⚠️</div>
+            <div class="model-config-status-text">尚未配置模型，请添加一个提供商并激活模型</div>
+        `;
+    }
+}
+
+function renderProviderList(providers, active) {
+    const container = document.getElementById('model-config-content');
+    if (!providers || providers.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state" style="padding:40px">
+                <div class="empty-icon">🔧</div>
+                <h3>还没有提供商</h3>
+                <p>添加一个 API 提供商开始使用</p>
+                <button class="btn btn-primary" onclick="showAddProviderModal()" style="margin-top:12px">➕ 添加提供商</button>
+            </div>
+        `;
+        return;
+    }
+
+    const activeModelId = active?.model?.id || null;
+    let html = '<div style="margin-bottom:16px"><button class="btn btn-primary" onclick="showAddProviderModal()">➕ 添加提供商</button></div>';
+
+    providers.forEach(p => {
+        const isActiveProvider = p.is_active === 1;
+        html += renderProviderCard(p, p.models || [], activeModelId, isActiveProvider);
+    });
+
+    container.innerHTML = html;
+}
+
+function renderProviderCard(provider, models, activeModelId, isActiveProvider) {
+    const hasKey = provider.api_key ? '已配置' : '未配置';
+    const modelsHtml = models.length
+        ? models.map(m => renderModelRow(m, m.id === activeModelId && isActiveProvider)).join('')
+        : '<div style="padding:8px;color:var(--text-secondary);font-size:13px">暂无模型</div>';
+
+    return `
+        <div class="provider-card ${isActiveProvider ? 'active' : ''}">
+            <div class="provider-card-header">
+                <div>
+                    <div class="provider-card-name">
+                        🤖 ${provider.name}
+                        ${isActiveProvider ? '<span class="model-row-active-badge">当前</span>' : ''}
+                    </div>
+                    <div class="provider-card-meta">
+                        ${provider.base_url} · API Key: ${hasKey}
+                    </div>
+                </div>
+                <div class="provider-card-actions">
+                    ${!isActiveProvider ? `<button class="btn btn-sm btn-success" onclick="activateProvider(${provider.id})">激活</button>` : ''}
+                    <button class="btn btn-sm btn-outline" onclick="showEditProviderModal(${provider.id})">编辑</button>
+                    <button class="btn btn-sm btn-danger" onclick="deleteProvider(${provider.id})">删除</button>
+                    <button class="btn btn-sm btn-outline" onclick="testConnection(${provider.id})">测试连接</button>
+                </div>
+            </div>
+            <div class="provider-card-models">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+                    <span style="font-size:13px;font-weight:500;color:var(--text-secondary)">模型列表</span>
+                    <button class="btn btn-sm btn-outline" onclick="showAddModelModal(${provider.id})">➕ 添加模型</button>
+                </div>
+                ${modelsHtml}
+            </div>
+        </div>
+    `;
+}
+
+function renderModelRow(model, isActive) {
+    return `
+        <div class="model-row ${isActive ? 'active' : ''}">
+            <div>
+                <span class="model-row-name">${model.name}</span>
+                ${isActive ? '<span class="model-row-active-badge">当前 ★</span>' : ''}
+            </div>
+            <div class="model-row-actions">
+                ${!isActive ? `<button class="btn btn-sm btn-success" onclick="activateModel(${model.id})">激活</button>` : ''}
+                <button class="btn btn-sm btn-danger" onclick="deleteModel(${model.id})">删除</button>
+            </div>
+        </div>
+    `;
+}
+
+// ===== Provider 操作 =====
+
+function showAddProviderModal() {
+    document.getElementById('provider-modal-id').value = '';
+    document.getElementById('provider-modal-title').textContent = '添加提供商';
+    document.getElementById('provider-name').value = '';
+    document.getElementById('provider-base-url').value = '';
+    document.getElementById('provider-api-key').value = '';
+    document.getElementById('provider-modal').classList.add('active');
+}
+
+async function showEditProviderModal(id) {
+    try {
+        const providers = await API.get('/api/llm/providers');
+        const p = providers.find(x => x.id === id);
+        if (!p) return;
+        document.getElementById('provider-modal-id').value = id;
+        document.getElementById('provider-modal-title').textContent = '编辑提供商';
+        document.getElementById('provider-name').value = p.name;
+        document.getElementById('provider-base-url').value = p.base_url;
+        document.getElementById('provider-api-key').value = p.api_key ? '已配置（已隐藏）' : '';
+        document.getElementById('provider-modal').classList.add('active');
+    } catch (e) {
+        showToast('加载失败', 'error');
+    }
+}
+
+async function saveProvider() {
+    const id = document.getElementById('provider-modal-id').value;
+    const name = document.getElementById('provider-name').value.trim();
+    const baseUrl = document.getElementById('provider-base-url').value.trim();
+    let apiKey = document.getElementById('provider-api-key').value.trim();
+
+    if (!name || !baseUrl) {
+        showToast('名称和 Base URL 不能为空', 'error');
+        return;
+    }
+
+    if (apiKey === '已配置（已隐藏）') apiKey = '';
+
+    try {
+        if (id) {
+            const data = { name, base_url: baseUrl };
+            if (apiKey) data.api_key = apiKey;
+            await API.put(`/api/llm/providers/${id}`, data);
+            showToast('提供商已更新', 'success');
+        } else {
+            await API.post('/api/llm/providers', { name, base_url: baseUrl, api_key: apiKey });
+            showToast('提供商已添加', 'success');
+        }
+        closeProviderModal();
+        loadModelConfig();
+    } catch (e) {
+        showToast('保存失败', 'error');
+    }
+}
+
+async function deleteProvider(id) {
+    if (!confirm('确定要删除此提供商及其所有模型吗？')) return;
+    try {
+        await API.delete(`/api/llm/providers/${id}`);
+        showToast('已删除', 'success');
+        loadModelConfig();
+    } catch (e) {
+        showToast('删除失败', 'error');
+    }
+}
+
+function closeProviderModal() {
+    document.getElementById('provider-modal').classList.remove('active');
+}
+
+// ===== Model 操作 =====
+
+function showAddModelModal(providerId) {
+    document.getElementById('model-modal-provider-id').value = providerId;
+    document.getElementById('model-name').value = '';
+    document.getElementById('model-modal').classList.add('active');
+}
+
+async function saveModel() {
+    const providerId = document.getElementById('model-modal-provider-id').value;
+    const name = document.getElementById('model-name').value.trim();
+    if (!name) {
+        showToast('模型名称不能为空', 'error');
+        return;
+    }
+    try {
+        await API.post(`/api/llm/providers/${providerId}/models`, { name });
+        showToast('模型已添加', 'success');
+        closeModelModal();
+        loadModelConfig();
+    } catch (e) {
+        showToast('保存失败', 'error');
+    }
+}
+
+async function deleteModel(id) {
+    if (!confirm('确定要删除此模型吗？')) return;
+    try {
+        await API.delete(`/api/llm/models/${id}`);
+        showToast('已删除', 'success');
+        loadModelConfig();
+    } catch (e) {
+        showToast('删除失败', 'error');
+    }
+}
+
+function closeModelModal() {
+    document.getElementById('model-modal').classList.remove('active');
+}
+
+// ===== 激活 =====
+
+async function activateProvider(id) {
+    try {
+        await API.post(`/api/llm/providers/${id}/activate`);
+        showToast('已切换提供商', 'success');
+        loadModelConfig();
+    } catch (e) {
+        showToast('激活失败', 'error');
+    }
+}
+
+async function activateModel(id) {
+    try {
+        await API.post(`/api/llm/models/${id}/activate`);
+        showToast('已切换模型', 'success');
+        loadModelConfig();
+    } catch (e) {
+        showToast('激活失败', 'error');
+    }
+}
+
+// ===== 测试连接 =====
+
+async function testConnection(providerId) {
+    try {
+        const result = await API.post('/api/llm/test', { provider_id: providerId });
+        if (result.success) {
+            showToast(result.message, 'success');
+        } else {
+            showToast(result.message, 'error');
+        }
+    } catch (e) {
+        showToast('测试请求失败', 'error');
+    }
+}
+
 // ==================== 初始化 ====================
 document.addEventListener('DOMContentLoaded', function() {
     // 导航
@@ -1538,6 +1813,9 @@ document.addEventListener('DOMContentLoaded', function() {
             const view = btn.dataset.view;
             if (view === 'create-course') {
                 showCreateCourse();
+            } else if (view === 'model-config') {
+                switchView(view);
+                loadModelConfig();
             } else {
                 switchView(view);
                 if (view === 'dashboard') loadDashboard();

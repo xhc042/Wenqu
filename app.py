@@ -22,7 +22,7 @@ import aiofiles
 from config import (
     HOST, PORT, STATIC_DIR, DATA_DIR, ROLES_META,
     DEFAULT_SLIDERS, DEPTH_CONFIG, DURATION_OPTIONS,
-    ROLE_RECOMMENDATION, DEFAULT_ROLES,
+    ROLE_RECOMMENDATION, DEFAULT_ROLES, LLM_CONFIG, VERSION,
 )
 from database import init_db
 import database as db
@@ -46,7 +46,7 @@ def _utc_list(items, field):
 
 
 # ==================== 初始化 ====================
-app = FastAPI(title="问渠（Wenqu）v1.1", version="1.1.0")
+app = FastAPI(title=f"问渠（Wenqu）v{VERSION}", version=VERSION)
 
 app.add_middleware(
     CORSMiddleware,
@@ -68,6 +68,33 @@ async def startup():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "uploads").mkdir(parents=True, exist_ok=True)
 
+    # 从数据库同步活跃的 LLM 配置到内存
+    active = db.get_active_model_with_provider()
+    if active:
+        LLM_CONFIG["api_key"] = active["api_key"]
+        LLM_CONFIG["base_url"] = active["base_url"]
+        LLM_CONFIG["model"] = active["model_name"]
+        llm.api_key = active["api_key"]
+        llm.base_url = active["base_url"].rstrip("/")
+        llm.model = active["model_name"]
+    else:
+        # 数据库无配置（首次运行或迁移），检查是否需要从旧配置迁移
+        providers = db.get_all_llm_providers()
+        if not providers:
+            fallback = LLM_CONFIG.get("base_url", "")
+            if fallback and fallback != "https://api.deepseek.com":
+                # 用户曾通过 env var 或旧 modal 配置过，迁移到数据库
+                name = "默认提供商"
+                pid = db.add_llm_provider(name, fallback, LLM_CONFIG.get("api_key", ""))
+                db.add_llm_model(pid, LLM_CONFIG.get("model", "deepseek-chat"))
+                db.set_active_provider(pid)
+                # 重新读取一次
+                active = db.get_active_model_with_provider()
+                if active:
+                    llm.api_key = active["api_key"]
+                    llm.base_url = active["base_url"].rstrip("/")
+                    llm.model = active["model_name"]
+
 
 # ==================== 前端路由 ====================
 @app.get("/", response_class=HTMLResponse)
@@ -75,13 +102,14 @@ async def index():
     index_path = STATIC_DIR / "index.html"
     if index_path.exists():
         content = index_path.read_text(encoding="utf-8")
+        content = content.replace("{{VERSION}}", VERSION)
         return HTMLResponse(content)
-    return HTMLResponse("<h1>问渠 v1.1</h1><p>前端页面未找到，请确保static/index.html存在。</p>")
+    return HTMLResponse(f"<h1>问渠 v{VERSION}</h1><p>前端页面未找到，请确保static/index.html存在。</p>")
 
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "version": "1.1.0"}
+    return {"status": "ok", "version": VERSION}
 
 
 # ==================== 课程管理 ====================
@@ -936,7 +964,208 @@ async def update_llm_settings(data: dict):
     if "model" in data and data["model"]:
         LLM_CONFIG["model"] = data["model"]
         llm.model = data["model"]
+
+    # 同步到数据库中的活跃配置（如有）
+    active = db.get_active_model_with_provider()
+    if active:
+        updates = {}
+        if "api_key" in data and data["api_key"]:
+            updates["api_key"] = data["api_key"]
+        if "base_url" in data and data["base_url"]:
+            updates["base_url"] = data["base_url"]
+        if updates:
+            db.update_llm_provider(active["provider_id"], **updates)
+        if "model" in data and data["model"]:
+            model_id = active.get("model_id")
+            if model_id:
+                db.update_llm_model_rename(model_id, data["model"])
+    else:
+        # 没有库记录时，在数据库中创建一份
+        name = data.get("name", "默认提供商")
+        base_url = data.get("base_url") or LLM_CONFIG.get("base_url", "https://api.deepseek.com")
+        api_key = data.get("api_key") or LLM_CONFIG.get("api_key", "")
+        model = data.get("model") or LLM_CONFIG.get("model", "deepseek-chat")
+        providers = db.get_all_llm_providers()
+        if not providers:
+            pid = db.add_llm_provider(name, base_url, api_key)
+            db.add_llm_model(pid, model)
+            db.set_active_provider(pid)
+        else:
+            # 使用第一个 provider 更新
+            db.update_llm_provider(providers[0]["id"], base_url=base_url, api_key=api_key)
+
     return {"status": "ok"}
+
+
+# ==================== LLM 提供商管理 ====================
+
+@app.get("/api/llm/providers")
+async def list_llm_providers():
+    """列出所有提供商（含 models）"""
+    return db.get_all_llm_providers()
+
+
+@app.post("/api/llm/providers")
+async def create_llm_provider(data: dict):
+    name = data.get("name", "").strip()
+    base_url = data.get("base_url", "").strip()
+    api_key = data.get("api_key", "").strip()
+    if not name or not base_url:
+        raise HTTPException(400, "名称和 Base URL 不能为空")
+    provider_id = db.add_llm_provider(name, base_url, api_key)
+    return {"provider_id": provider_id}
+
+
+@app.put("/api/llm/providers/{provider_id}")
+async def update_llm_provider(provider_id: int, data: dict):
+    db.update_llm_provider(
+        provider_id,
+        name=data.get("name"),
+        base_url=data.get("base_url"),
+        api_key=data.get("api_key"),
+    )
+    return {"status": "ok"}
+
+
+@app.delete("/api/llm/providers/{provider_id}")
+async def delete_llm_provider(provider_id: int):
+    provider = db.get_llm_provider(provider_id)
+    if not provider:
+        raise HTTPException(404, "提供商不存在")
+    was_active = provider["is_active"]
+    db.delete_llm_provider(provider_id)
+    # 如果删除了活跃提供商，尝试激活其他任意一个
+    if was_active:
+        remaining = db.get_all_llm_providers()
+        if remaining:
+            db.set_active_provider(remaining[0]["id"])
+            models = db.get_llm_models(remaining[0]["id"])
+            if models:
+                db.set_active_model(models[0]["id"])
+    # 同步 llm 单例
+    _sync_llm_from_db()
+    return {"status": "ok"}
+
+
+@app.post("/api/llm/providers/{provider_id}/activate")
+async def activate_llm_provider(provider_id: int):
+    provider = db.get_llm_provider(provider_id)
+    if not provider:
+        raise HTTPException(404, "提供商不存在")
+    models = db.get_llm_models(provider_id)
+    if not models:
+        raise HTTPException(400, "此提供商下没有模型，请先添加模型")
+    db.set_active_provider(provider_id)
+    # 如果该提供商下没有任何 model 激活，激活第一个
+    if not any(m["is_active"] for m in models):
+        db.set_active_model(models[0]["id"])
+    _sync_llm_from_db()
+    return {"status": "ok"}
+
+
+@app.get("/api/llm/providers/{provider_id}/models")
+async def list_llm_models(provider_id: int):
+    return db.get_llm_models(provider_id)
+
+
+@app.post("/api/llm/providers/{provider_id}/models")
+async def create_llm_model(provider_id: int, data: dict):
+    name = data.get("name", "").strip()
+    if not name:
+        raise HTTPException(400, "模型名称不能为空")
+    provider = db.get_llm_provider(provider_id)
+    if not provider:
+        raise HTTPException(404, "提供商不存在")
+    model_id = db.add_llm_model(provider_id, name)
+    # 如果此 provider 恰是活跃的，同步 llm 单例
+    if provider["is_active"]:
+        _sync_llm_from_db()
+    return {"model_id": model_id}
+
+
+@app.delete("/api/llm/models/{model_id}")
+async def delete_llm_model(model_id: int):
+    model = db.get_llm_model(model_id)
+    if not model:
+        raise HTTPException(404, "模型不存在")
+    provider = db.get_llm_provider(model["provider_id"])
+    db.delete_llm_model(model_id)
+    # 如果删除了活跃 model，激活该 provider 下的第一个 model
+    if model["is_active"] and provider:
+        remaining = db.get_llm_models(provider["id"])
+        if remaining:
+            db.set_active_model(remaining[0]["id"])
+    _sync_llm_from_db()
+    return {"status": "ok"}
+
+
+@app.post("/api/llm/models/{model_id}/activate")
+async def activate_llm_model(model_id: int):
+    model = db.get_llm_model(model_id)
+    if not model:
+        raise HTTPException(404, "模型不存在")
+    provider = db.get_llm_provider(model["provider_id"])
+    if not provider:
+        raise HTTPException(404, "提供商不存在")
+    db.set_active_provider(provider["id"])
+    db.set_active_model(model_id)
+    _sync_llm_from_db()
+    return {"status": "ok"}
+
+
+@app.get("/api/llm/active")
+async def get_active_llm_config():
+    """获取当前活跃配置"""
+    active = db.get_active_model_with_provider()
+    if active:
+        return {
+            "provider": {"id": active["provider_id"], "name": active["provider_name"], "base_url": active["base_url"]},
+            "model": {"id": active["model_id"], "name": active["model_name"]},
+            "has_api_key": bool(active.get("api_key", "")),
+        }
+    return {"provider": None, "model": None, "has_api_key": False}
+
+
+@app.post("/api/llm/test")
+async def test_llm_connection(data: dict):
+    """测试连接"""
+    provider_id = data.get("provider_id")
+    model_name = data.get("model_name", "")
+    api_key = data.get("api_key", "")
+
+    if provider_id:
+        provider = db.get_llm_provider(provider_id)
+        if not provider:
+            raise HTTPException(404, "提供商不存在")
+        base_url = provider["base_url"]
+        if not api_key:
+            api_key = provider["api_key"]
+        if not model_name:
+            models = db.get_llm_models(provider_id)
+            if models:
+                model_name = models[0]["name"]
+    else:
+        raise HTTPException(400, "缺少 provider_id")
+
+    if not model_name:
+        return {"success": False, "message": "没有可测试的模型"}
+    if not api_key:
+        return {"success": False, "message": "API Key 为空"}
+
+    result = await llm.test_connection(base_url, model_name, api_key)
+    return result
+
+
+def _sync_llm_from_db():
+    """将数据库活跃配置同步到 llm 单例和 LLM_CONFIG"""
+    active = db.get_active_model_with_provider()
+    if active:
+        LLM_CONFIG["api_key"] = active["api_key"]
+        LLM_CONFIG["base_url"] = active["base_url"]
+        LLM_CONFIG["model"] = active["model_name"]
+        llm.api_key = active["api_key"]
+        llm.base_url = active["base_url"].rstrip("/")
+        llm.model = active["model_name"]
 
 
 # ==================== 健康检查 ====================
@@ -947,13 +1176,13 @@ async def get_config():
         "roles": list(ROLES_META.keys()),
         "depth_options": list(DEPTH_CONFIG.keys()),
         "duration_options": DURATION_OPTIONS,
-        "version": "1.1.0",
+        "version": VERSION,
     }
 
 
 # ==================== 启动 ====================
 if __name__ == "__main__":
     import uvicorn
-    print(f"🌊 问渠（Wenqu）v1.1 启动中...")
+    print(f"🌊 问渠（Wenqu）v{VERSION} 启动中...")
     print(f"📚 访问地址：http://{HOST}:{PORT}")
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")
