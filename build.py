@@ -46,10 +46,9 @@ def build():
         sys.exit(1)
 
     # Clean old builds
-    for d in [BUILD_DIR]:
-        if os.path.exists(d):
-            print(f"[..] Cleaning {d}...")
-            shutil.rmtree(d)
+    if os.path.exists(BUILD_DIR):
+        print(f"[..] Cleaning {BUILD_DIR}...")
+        shutil.rmtree(BUILD_DIR)
     # Clean old single-file exe
     if os.path.exists(DIST_FILE):
         os.remove(DIST_FILE)
@@ -63,7 +62,7 @@ def build():
     print("[..] Packaging, please wait (1-3 minutes)...")
     print()
 
-# Build command
+    # Build command
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--name", APP_NAME,
@@ -75,26 +74,39 @@ def build():
         "--add-data", f"prompts{os.pathsep}prompts",
     ]
 
-    # Collect all uvicorn submodules (version-safe, no need to maintain manual list)
-    cmd.extend(["--collect-all", "uvicorn"])
+    # Hidden imports for runtime discovery safety
+    HIDDEN_IMPORTS = [
+        "multipart",          # FastAPI file uploads (python-multipart)
+        "config",             # local module
+        "database",           # local module
+        "chunker",            # local module
+        "state_machine",      # local module
+        "llm_client",         # local module
+        "uvicorn.logging",    # uvicorn submodule
+        "uvicorn.loops.asyncio",
+        "uvicorn.protocols.http.h11_impl",
+        "uvicorn.protocols.websockets.websockets_impl",
+        "uvicorn.middleware.wsgi",
+        "uvicorn.supervisors.multiprocess",
+        "uvicorn.supervisors.statreload",
+    ]
+    for mod in HIDDEN_IMPORTS:
+        cmd.extend(["--hidden-import", mod])
 
-    # Exclude all packages not used by the project — saves ~300MB
+    # Collect all submodules for key packages
+    cmd.extend(["--collect-all", "uvicorn"])
+    cmd.extend(["--collect-all", "websockets"])
+
+    # Exclude packages not used by the project
     EXCLUDES = [
         "torch", "numpy", "scipy", "pandas", "matplotlib",
-        "PIL", "Pillow", "cv2", "pyarrow", "grpc",
+        "PIL", "cv2", "pyarrow", "grpc",
         "cryptography", "psycopg2", "sqlalchemy", "redis",
-        "tensorflow", "tqdm", "six", "absl", "yaml",
-        "google", "fontTools", "kiwisolver", "contourpy",
-        "dateutil", "greenlet", "charset_normalizer",
-        "aiohttp", "yarl", "multidict", "frozenlist",
-        "opentelemetry", "email_validator", "xxhash",
-        "simplejson", "wcwidth", "tzdata", "propcache",
-        "bcrypt", "watchfiles", "httptools", "zstandard",
+        "tensorflow", "tqdm", "google",
+        "aiohttp", "yarl", "multidict",
         "setuptools", "pip", "wheel", "pkg_resources",
-        "numba", "sympy", "networkx", "h5py", "bokeh",
         "flask", "django", "notebook", "jupyter",
         "mypy", "pytest", "coverage", "black", "flake8",
-        "PIL._tkinter_finder",
         "zmq", "pyzmq", "msgpack",
     ]
     for mod in EXCLUDES:

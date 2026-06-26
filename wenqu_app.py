@@ -16,7 +16,8 @@ import socket
 
 # ==================== Path handling (PyInstaller support) ====================
 if getattr(sys, 'frozen', False):
-    BASE_DIR = os.path.dirname(sys.executable)
+    # --onefile: sys.executable 指向临时目录，用 sys.argv[0] 获取原始 exe 路径
+    BASE_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
