@@ -81,6 +81,40 @@ DEPTH_CONFIG = {
     },
 }
 
+# ==================== 阅读模式配置 ====================
+READING_MODE_CONFIG = {
+    "speed": {
+        "label": "速读",
+        "emoji": "🚀",
+        "extract_depth": "toc_only",          # 仅提取目录结构
+        "content_sample": "first_last",        # 每章只取首尾段
+        "llm_tier": "fast",                    # 使用轻量级模型
+        "generate_syllabus": False,            # 不生成掌握项
+        "description": "快速建立知识地图，决定是否深入",
+    },
+    "standard": {
+        "label": "细读",
+        "emoji": "📖",
+        "extract_depth": "full",               # 提取全文
+        "content_sample": "full_5000",         # 截取前5000字符
+        "llm_tier": "balanced",                # 使用标准模型
+        "generate_syllabus": True,             # 生成标准掌握项
+        "description": "系统学习，逐章推进",
+    },
+    "deep": {
+        "label": "研读",
+        "emoji": "🔬",
+        "extract_depth": "full_lazy",          # 全文但懒加载
+        "content_sample": "full",              # 不截断
+        "llm_tier": "flagship",                # 使用最强模型
+        "generate_syllabus": True,             # 生成深度掌握项
+        "generate_socratic_questions": True,   # 额外生成认知冲突问题
+        "description": "学术研究，专业精进，苏格拉底式追问",
+    },
+}
+
+DEFAULT_READING_MODE = "standard"
+
 # 心流检测参数
 FLOW_DETECTION = {
     "min_rounds": 3,
@@ -184,6 +218,45 @@ WS_HEARTBEAT_INTERVAL = 30
 # 服务器配置
 HOST = os.getenv("WENQU_HOST", "127.0.0.1")
 PORT = int(os.getenv("WENQU_PORT", "8765"))
+
+# ==================== LLM 多模型层级配置 ====================
+MODEL_TIER_CONFIG = {
+    "fast": {
+        "label": "轻量级",
+        "description": "用于目录提取、摘要、简单问答（如 Claude Haiku / GPT-4o-mini）",
+        "base_url": "",
+        "api_key": "",
+        "model": "",
+    },
+    "balanced": {
+        "label": "标准级",
+        "description": "用于掌握项生成、常规对话（如 Claude Sonnet / GPT-4o）",
+        "base_url": "",
+        "api_key": "",
+        "model": "",
+    },
+    "flagship": {
+        "label": "旗舰级",
+        "description": "用于深度研读、苏格拉底追问（如 Claude Opus / GPT-4o）",
+        "base_url": "",
+        "api_key": "",
+        "model": "",
+    },
+}
+
+DEFAULT_MODEL_TIER = "balanced"
+
+
+def get_model_tier_config(tier: str) -> dict:
+    """获取指定层级的模型配置，优先从数据库读取，未配则继承主模型"""
+    tier_cfg = MODEL_TIER_CONFIG.get(tier, MODEL_TIER_CONFIG["balanced"])
+    cfg = dict(tier_cfg)
+    # 如果该层级没有独立配置，复用主模型
+    if not cfg.get("model"):
+        cfg["base_url"] = get_llm_config()["base_url"]
+        cfg["api_key"] = get_llm_config()["api_key"]
+        cfg["model"] = get_llm_config()["model"]
+    return cfg
 
 # LLM API 配置（可动态修改）
 def get_llm_config():

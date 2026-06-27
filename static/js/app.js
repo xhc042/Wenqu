@@ -7,6 +7,7 @@
 const AppState = {
     currentView: 'dashboard',
     currentCourseId: null,
+    currentChapterIndex: null,
     currentSessionId: null,
     ws: null,
     chatMessages: [],
@@ -17,6 +18,7 @@ const AppState = {
     defenseAnswers: [],
     defenseTimer: null,
     roles: [],
+    selectedReadingMode: 'standard',
 };
 
 // ==================== API 封装 ====================
@@ -280,6 +282,48 @@ function setupFileUpload() {
     fileInput.onchange = () => {
         if (fileInput.files.length) handleFile(fileInput.files[0]);
     };
+
+    // URL 输入时自动填入课程名称
+    const urlInput = document.getElementById('url-input');
+    if (urlInput) {
+        urlInput.addEventListener('change', function() {
+            const titleInput = document.getElementById('course-title-input');
+            if (!titleInput.value.trim() && this.value.trim()) {
+                try {
+                    const url = new URL(this.value.trim());
+                    // 尝试从路径中提取文件名作为书名
+                    let name = url.pathname.split('/').pop() || url.hostname;
+                    // 去掉常见扩展名
+                    const exts = ['.txt', '.md', '.markdown', '.epub'];
+                    for (const ext of exts) {
+                        if (name.toLowerCase().endsWith(ext)) {
+                            name = name.slice(0, -ext.length);
+                            break;
+                        }
+                    }
+                    // URL解码
+                    try { name = decodeURIComponent(name); } catch(e) {}
+                    if (name && name.length > 1) {
+                        titleInput.value = name;
+                    }
+                } catch(e) {}
+            }
+        });
+    }
+
+    // 文本粘贴时自动提取第一行作为课程名称
+    const textContent = document.getElementById('text-content');
+    if (textContent) {
+        textContent.addEventListener('input', function() {
+            const titleInput = document.getElementById('course-title-input');
+            if (!titleInput.value.trim() && this.value.trim()) {
+                const firstLine = this.value.trim().split('\n')[0].trim();
+                if (firstLine) {
+                    titleInput.value = firstLine.slice(0, 50);
+                }
+            }
+        });
+    }
 }
 
 async function handleFile(file) {
@@ -290,9 +334,31 @@ async function handleFile(file) {
         document.getElementById('file-path').value = result.file_path;
         document.getElementById('file-source-type').value = result.source_type;
         showToast('文件上传成功');
+
+        // 自动填入文件名作为课程名称（去掉扩展名）
+        const titleInput = document.getElementById('course-title-input');
+        if (!titleInput.value.trim()) {
+            let name = file.name;
+            const exts = ['.txt', '.md', '.markdown', '.epub'];
+            for (const ext of exts) {
+                if (name.toLowerCase().endsWith(ext)) {
+                    name = name.slice(0, -ext.length);
+                    break;
+                }
+            }
+            titleInput.value = name;
+        }
     } catch (e) {
         showToast('上传失败: ' + e.message, 'error');
     }
+}
+
+// ==================== 阅读模式选择 ====================
+function selectReadingMode(mode) {
+    AppState.selectedReadingMode = mode;
+    document.querySelectorAll('.mode-btn').forEach(btn => {
+        btn.classList.toggle('selected', btn.dataset.mode === mode);
+    });
 }
 
 async function submitCreateCourse() {
@@ -331,6 +397,7 @@ async function submitCreateCourse() {
             source_type: sourceType,
             source_path: sourcePath,
             content_text: mode === 'text' ? document.getElementById('text-content').value : '',
+            reading_mode: AppState.selectedReadingMode,
         });
 
         showToast('课程创建成功！', 'success');
@@ -368,9 +435,21 @@ async function openCourse(courseId) {
     }
 
     try {
-        const data = await API.get(`/api/courses/${courseId}`);
+        // 同时获取课程详情和历史数据
+        const [data, historyData] = await Promise.all([
+            API.get(`/api/courses/${courseId}`),
+            API.get(`/api/courses/${courseId}/history`).catch(() => ({ history: [] }))
+        ]);
+
         const course = data.course;
         if (!course) { showToast('课程不存在', 'error'); return; }
+
+        // 统计每个章节的学习次数
+        const chapterSessionCounts = {};
+        (historyData.history || []).forEach(s => {
+            const idx = s.chapter_index;
+            chapterSessionCounts[idx] = (chapterSessionCounts[idx] || 0) + 1;
+        });
 
         // 更新header
         const sessionCount = data.sessions_count || 0;
@@ -435,8 +514,8 @@ async function openCourse(courseId) {
             defenseBanner.classList.remove('show');
         }
 
-        // 章节列表
-        renderChapters(data.chapters || [], data.syllabus || []);
+        // 章节列表（传入章节学习次数用于显示历史按钮）
+        renderChapters(data.chapters || [], data.syllabus || [], chapterSessionCounts);
 
         // 课后产出物
         renderPostClass(data);
@@ -452,7 +531,7 @@ async function openCourse(courseId) {
     }
 }
 
-function renderChapters(chapters, syllabus) {
+function renderChapters(chapters, syllabus, chapterSessionCounts = {}) {
     const list = document.getElementById('chapter-list');
     list.innerHTML = '';
 
@@ -461,31 +540,96 @@ function renderChapters(chapters, syllabus) {
         return;
     }
 
-    chapters.forEach((ch, idx) => {
-        const chapterSyllabus = syllabus.filter(s => s.chapter_index === ch.idx);
-        const mastered = chapterSyllabus.filter(s => s.status === 'mastered').length;
-        const total = chapterSyllabus.length;
+    // 构建树形结构
+    const tree = buildChapterTree(chapters);
 
-        const div = document.createElement('div');
-        div.className = 'chapter-item';
-        div.innerHTML = `
-            <div class="chapter-index">${ch.idx + 1}</div>
-            <div class="chapter-info">
-                <div class="chapter-title">${ch.title}</div>
-                <div class="chapter-items-count">
-                    ${total > 0 ? `${mastered}/${total} 项掌握` : '暂无掌握项'}
-                    <span style="margin-left:8px">
-                        ${chapterSyllabus.map(s => {
-                        const displayText = s.description.slice(0, 80) + (s.description.length > 80 ? '...' : '');
-                        return `<span class="tag tag-${s.status === 'mastered' ? 'mastered' : s.status === 'in_progress' ? 'progress' : 'pending'}" style="margin:0 2px;cursor:pointer" title="${s.description}" onclick="viewSyllabusDetail(${s.id}, this.title)">${displayText}</span>`;
-                    }).join(' ')}
-                    </span>
+    function renderTreeItems(items, depth) {
+        return items.map(ch => {
+            const chapterSyllabus = syllabus.filter(s => s.chapter_index === ch.idx);
+            const mastered = chapterSyllabus.filter(s => s.status === 'mastered').length;
+            const total = chapterSyllabus.length;
+            const isLoaded = ch.is_loaded !== undefined ? ch.is_loaded : 1;
+            const hasChildren = ch.children && ch.children.length > 0;
+            const indent = depth * 20;
+
+            const div = document.createElement('div');
+            div.className = 'chapter-item';
+            div.style.marginLeft = `${indent}px`;
+            div.style.borderLeft = depth > 0 ? '2px solid var(--border)' : 'none';
+            div.style.paddingLeft = depth > 0 ? '12px' : '16px';
+
+            // 层级指示器
+            const levelIcon = depth === 0 ? '📖' : depth === 1 ? '📄' : '📌';
+
+            const sessionCount = chapterSessionCounts[ch.idx] || 0;
+
+            div.innerHTML = `
+                <div class="chapter-index">${levelIcon}</div>
+                <div class="chapter-info">
+                    <div class="chapter-title" style="font-weight:${depth <= 1 ? '600' : '400'}">
+                        ${ch.title}
+                        ${!isLoaded ? '<span class="tag tag-pending" style="font-size:11px;margin-left:6px">⏳ 未加载</span>' : ''}
+                        ${isLoaded && ch.summary ? '<span style="font-size:11px;color:#636e72;display:block;margin-top:2px">' + ch.summary.slice(0, 60) + '</span>' : ''}
+                    </div>
+                    <div class="chapter-items-count">
+                        ${(() => {
+                            const wordCount = ch.content_slice ? ch.content_slice.length : 0;
+                            const wordStr = wordCount >= 1000 ? (wordCount / 1000).toFixed(1) + 'k' : wordCount.toString();
+                            const wordDisplay = wordCount > 0 ? `<span style="color:#636e72;font-size:11px;margin-right:8px">📝 ${wordStr}字</span>` : '';
+                            const masteryDisplay = total > 0 ? `${mastered}/${total} 项掌握` : (isLoaded ? '暂无掌握项' : '点击"开始学习"加载内容');
+                            return wordDisplay + masteryDisplay;
+                        })()}
+                        <span style="margin-left:8px">
+                            ${chapterSyllabus.map(s => {
+                            const displayText = s.description.slice(0, 60) + (s.description.length > 60 ? '...' : '');
+                            const isMastered = s.status === 'mastered';
+                            return `<span class="tag tag-${isMastered ? 'mastered' : s.status === 'in_progress' ? 'progress' : 'pending'}" style="margin:0 2px;cursor:pointer;font-size:11px" title="${s.description}" onclick="viewSyllabusDetail(${s.id}, this.title)">${displayText}${isMastered ? ' ✅' : ''}</span>` +
+                                (isMastered ? '' : `<button class="btn btn-xs" style="font-size:10px;padding:0 4px;margin-left:1px;vertical-align:middle;border:none;background:var(--success);color:#fff;border-radius:3px;cursor:pointer" onclick="event.stopPropagation();markSyllabusMastered(${s.id}, this)" title="标记为已掌握">✓</button>`);
+                        }).join(' ')}
+                        </span>
+                    </div>
                 </div>
-            </div>
-            <button class="btn btn-primary btn-sm" onclick="startChat(${ch.idx})">开始学习</button>
-        `;
-        list.appendChild(div);
+                <div class="chapter-actions">
+                    ${sessionCount > 0 ? `<button class="btn btn-outline btn-sm chapter-history-btn" onclick="event.stopPropagation();showChapterHistory(${ch.idx})" title="查看学习历史(${sessionCount}次)">📜 ${sessionCount}</button>` : ''}
+                    <button class="btn btn-primary btn-sm" onclick="startChat(${ch.idx})">
+                        ${!isLoaded ? '⏳ 加载并学习' : '开始学习'}
+                    </button>
+                </div>
+            `;
+            list.appendChild(div);
+
+            // 递归渲染子节点
+            if (hasChildren) {
+                renderTreeItems(ch.children, depth + 1);
+            }
+
+            return div;
+        });
+    }
+
+    renderTreeItems(tree, 0);
+}
+
+function buildChapterTree(chapters) {
+    // 构建层级树
+    const map = {};
+    const roots = [];
+
+    chapters.forEach(ch => {
+        map[ch.idx] = { ...ch, children: [] };
     });
+
+    chapters.forEach(ch => {
+        const parentIdx = ch.parent_idx !== undefined && ch.parent_idx !== null && ch.parent_idx >= 0 ? ch.parent_idx : -1;
+        if (parentIdx >= 0 && map[parentIdx]) {
+            map[parentIdx].children.push(map[ch.idx]);
+        } else {
+            roots.push(map[ch.idx]);
+        }
+    });
+
+    // 如果所有章节都是平级的（parent_idx === -1），直接返回
+    return roots.length > 0 ? roots : chapters.map(ch => ({ ...ch, children: [] }));
 }
 
 // ==================== 学习契约弹窗 ====================
@@ -719,7 +863,34 @@ function closeSlidersModal() {
 // ==================== 对话 ====================
 async function startChat(chapterIndex) {
     const courseId = AppState.currentCourseId;
-    const course = await API.get(`/api/courses/${courseId}`);
+    let courseData;
+
+    // 获取章节信息用于显示
+    let chapterTitle = `第 ${chapterIndex + 1} 章`;
+    try {
+        courseData = await API.get(`/api/courses/${courseId}`);
+        const chapters = courseData.chapters || [];
+        const chapter = chapters.find(c => c.idx === chapterIndex);
+
+        // 更新对话页顶部章节名称
+        document.getElementById('chat-chapter-name').textContent = chapter?.title || chapterTitle;
+
+        // 检查章节是否已加载，未加载则触发懒加载
+        if (chapter && !chapter.is_loaded) {
+            showToast('正在加载本章内容...');
+            await API.post(`/api/courses/${courseId}/chapters/${chapterIndex}/load`, {});
+            showToast('章节内容已就绪！', 'success');
+        }
+    } catch (e) {
+        console.warn('章节信息加载失败，继续启动对话', e);
+        document.getElementById('chat-chapter-name').textContent = chapterTitle;
+    }
+
+    // 使用已获取的 courseData，避免重复请求
+    if (!courseData) {
+        courseData = await API.get(`/api/courses/${courseId}`);
+    }
+    const course = courseData;
     const teacherId = course.course.current_teacher || 'ganyu';
     const depth = course.course.current_depth || 'standard';
     AppState.currentTeacherId = teacherId;
@@ -736,16 +907,363 @@ async function startChat(chapterIndex) {
             depth: depth,
         });
         AppState.currentSessionId = result.session_id;
+        AppState.currentChapterIndex = chapterIndex;
 
         switchView('chat');
         document.getElementById('chat-messages').innerHTML = '';
         document.getElementById('chat-status').textContent = '正在建立连接...';
         document.getElementById('chat-input').disabled = true;
         document.getElementById('send-btn').disabled = true;
+        document.getElementById('mastered-btn').style.display = 'none';
 
         connectWebSocket(result.session_id);
+
+        // 如果有下一章，提前加载（苏格拉底预演）
+        autoPreviewNextChapter(courseId, chapterIndex, courseData?.chapters || []);
     } catch (e) {
         showToast('启动对话失败: ' + e.message, 'error');
+    }
+}
+
+// ==================== 章节历史对话列表 ====================
+async function showChapterHistory(chapterIdx) {
+    const courseId = AppState.currentCourseId;
+
+    try {
+        const [courseData, historyData] = await Promise.all([
+            API.get(`/api/courses/${courseId}`),
+            API.get(`/api/courses/${courseId}/history`)
+        ]);
+
+        const chapters = courseData.chapters || [];
+        const chapter = chapters.find(c => c.idx === chapterIdx);
+        const chapterTitle = chapter?.title || `第 ${chapterIdx + 1} 章`;
+
+        const sessions = historyData.history || [];
+        const chapterSessions = sessions.filter(s => s.chapter_index === chapterIdx);
+
+        const modal = document.getElementById('history-chat-modal');
+        const content = document.getElementById('history-chat-content');
+
+        // 更新弹窗标题
+        modal.querySelector('h2').textContent = `📖 ${chapterTitle}`;
+
+        if (chapterSessions.length === 0) {
+            content.innerHTML = `
+                <div class="history-empty">
+                    <div class="history-empty-icon">📚</div>
+                    <h3>暂无学习历史</h3>
+                    <p>开始本章学习后，对话记录会显示在这里</p>
+                </div>
+            `;
+            modal.classList.add('active');
+            return;
+        }
+
+        let html = `
+            <div class="history-list-header">
+                <div style="font-size:14px;color:var(--text-secondary);margin-bottom:12px">
+                    本章共 <strong>${chapterSessions.length}</strong> 次学习记录
+                </div>
+            </div>
+        `;
+
+        chapterSessions.forEach((s, idx) => {
+            const teacher = AppState.roles?.[s.teacher_role_id] || { emoji: '🎓', name: s.teacher_role_id };
+            const dateStr = s.started_at ? new Date(s.started_at).toLocaleString('zh-CN', {
+                year: 'numeric', month: '2-digit', day: '2-digit',
+                hour: '2-digit', minute: '2-digit'
+            }) : '未知时间';
+            const duration = s.duration_minutes || 0;
+            const rounds = s.total_rounds || 0;
+
+            html += `
+                <div class="history-list-item" onclick="viewChapterSessionHistory('${s.session_id}', ${chapterIdx})">
+                    <div class="history-list-icon">${teacher.emoji}</div>
+                    <div class="history-list-info">
+                        <div class="history-list-title">
+                            第 ${idx + 1} 次学习 · ${dateStr}
+                        </div>
+                        <div class="history-list-meta">
+                            <span>👤 ${teacher.name}</span>
+                            <span>💬 ${rounds} 轮</span>
+                            ${duration ? `<span>⏱️ ${duration}分钟</span>` : ''}
+                            ${s.has_summary ? '<span>📋 有总结</span>' : ''}
+                            ${s.has_diary ? '<span>📝 有日记</span>' : ''}
+                        </div>
+                    </div>
+                    <div class="history-list-arrow">›</div>
+                </div>
+            `;
+        });
+
+        content.innerHTML = html;
+        modal.classList.add('active');
+    } catch (e) {
+        showToast('加载历史失败: ' + e.message, 'error');
+    }
+}
+
+// 查看章节历史会话详情
+async function viewChapterSessionHistory(sessionId, chapterIdx) {
+    try {
+        const data = await API.get(`/api/sessions/${sessionId}`);
+        const session = data.session;
+        const messages = data.messages || [];
+
+        const modal = document.getElementById('history-chat-modal');
+        const content = document.getElementById('history-chat-content');
+
+        // 获取章节标题
+        let chapterTitle = `第 ${chapterIdx + 1} 章`;
+        if (AppState.currentCourseId) {
+            try {
+                const courseData = await API.get(`/api/courses/${AppState.currentCourseId}`);
+                const chapter = courseData.chapters?.find(c => c.idx === chapterIdx);
+                if (chapter?.title) chapterTitle = chapter.title;
+            } catch(e) {}
+        }
+
+        // 会话头部信息
+        const dateStr = session.started_at ? new Date(session.started_at).toLocaleString('zh-CN', {
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit'
+        }) : '未知';
+        const duration = session.total_duration || 0;
+
+        // 更新弹窗标题
+        modal.querySelector('h2').textContent = `📖 ${chapterTitle} - 历史对话`;
+
+        let headerHtml = `
+            <div class="history-detail-header">
+                <div class="history-detail-back" onclick="showChapterHistory(${chapterIdx})">
+                    ‹ 返回学习历史
+                </div>
+                <div style="display:flex;align-items:center;gap:12px;margin:16px 0">
+                    <span style="font-size:32px">${session.teacher_info?.emoji || '🎓'}</span>
+                    <div>
+                        <div style="font-size:18px;font-weight:700">${session.teacher_info?.name || '导师'}</div>
+                        <div style="font-size:13px;color:var(--text-secondary)">${session.teacher_info?.style || ''}</div>
+                    </div>
+                </div>
+                <div style="display:flex;flex-wrap:wrap;gap:8px;font-size:13px;color:var(--text-secondary)">
+                    <span>📖 ${chapterTitle}</span>
+                    <span>· 💬 ${session.total_rounds || 0} 轮对话</span>
+                    ${duration ? `<span>· ⏱️ ${duration} 分钟</span>` : ''}
+                    <span>· 📅 ${dateStr}</span>
+                </div>
+            </div>`;
+
+        // 对话消息
+        let messagesHtml = '';
+        if (messages.length === 0) {
+            messagesHtml = '<div class="empty-state" style="padding:40px"><p>暂无对话消息</p></div>';
+        } else {
+            messagesHtml = '<div class="history-chat-messages">';
+            messages.forEach(m => {
+                const isUser = m.role === 'user';
+                const stateLabel = m.state_marker ? getStateLabel(m.state_marker) : '';
+                const avatar = isUser ? '👤' : (session.teacher_info?.emoji || '🎓');
+                const time = m.created_at ? new Date(m.created_at).toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit'}) : '';
+
+                messagesHtml += `
+                    <div class="history-message ${isUser ? 'history-message-user' : 'history-message-assistant'}">
+                        <div class="history-message-avatar">${avatar}</div>
+                        <div class="history-message-bubble ${isUser ? 'user' : 'assistant'}">
+                            ${!isUser && stateLabel ? `<div class="history-state-badge">${stateLabel}</div>` : ''}
+                            <div class="history-message-text">${escapeHtml(m.content)}</div>
+                            ${time ? `<div class="history-message-time">${time}</div>` : ''}
+                        </div>
+                    </div>`;
+            });
+            messagesHtml += '</div>';
+        }
+
+        content.innerHTML = headerHtml + messagesHtml;
+        modal.scrollTop = 0;
+    } catch (e) {
+        showToast('加载历史对话失败: ' + e.message, 'error');
+    }
+}
+
+// ==================== 对话内历史对话列表 ====================
+async function showChatHistory() {
+    const courseId = AppState.currentCourseId;
+    const chapterIdx = AppState.currentChapterIndex;
+
+    try {
+        const data = await API.get(`/api/courses/${courseId}/history`);
+        const sessions = data.history || [];
+
+        // 按章节分组
+        const chapterSessions = sessions.filter(s => s.chapter_index === chapterIdx);
+
+        if (chapterSessions.length === 0) {
+            const modal = document.getElementById('history-chat-modal');
+            const content = document.getElementById('history-chat-content');
+            content.innerHTML = `
+                <div class="history-empty">
+                    <div class="history-empty-icon">📚</div>
+                    <h3>暂无历史对话</h3>
+                    <p>开始本章学习后，对话记录会显示在这里</p>
+                </div>
+            `;
+            modal.classList.add('active');
+            return;
+        }
+
+        const modal = document.getElementById('history-chat-modal');
+        const content = document.getElementById('history-chat-content');
+
+        let html = `<div class="history-list-header">
+            <div style="font-size:14px;color:var(--text-secondary);margin-bottom:12px">
+                当前章节共 <strong>${chapterSessions.length}</strong> 次学习记录
+            </div>
+        </div>`;
+
+        chapterSessions.forEach((s, idx) => {
+            const teacher = AppState.roles?.[s.teacher_role_id] || { emoji: '🎓', name: s.teacher_role_id };
+            const dateStr = s.started_at ? new Date(s.started_at).toLocaleString('zh-CN', {
+                year: 'numeric', month: '2-digit', day: '2-digit',
+                hour: '2-digit', minute: '2-digit'
+            }) : '未知时间';
+            const duration = s.total_duration || s.duration_minutes || 0;
+            const rounds = s.total_rounds || 0;
+
+            html += `
+                <div class="history-list-item" onclick="viewSessionHistory('${s.session_id}')">
+                    <div class="history-list-icon">${teacher.emoji}</div>
+                    <div class="history-list-info">
+                        <div class="history-list-title">
+                            第 ${idx + 1} 次学习 · ${dateStr}
+                        </div>
+                        <div class="history-list-meta">
+                            <span>👤 ${teacher.name}</span>
+                            <span>💬 ${rounds} 轮</span>
+                            ${duration ? `<span>⏱️ ${duration}分钟</span>` : ''}
+                            ${s.has_summary ? '<span>📋 有总结</span>' : ''}
+                            ${s.has_diary ? '<span>📝 有日记</span>' : ''}
+                        </div>
+                    </div>
+                    <div class="history-list-arrow">›</div>
+                </div>
+            `;
+        });
+
+        content.innerHTML = html;
+        modal.classList.add('active');
+    } catch (e) {
+        showToast('加载历史对话失败: ' + e.message, 'error');
+    }
+}
+
+// 查看单个历史会话详情
+async function viewSessionHistory(sessionId) {
+    try {
+        const data = await API.get(`/api/sessions/${sessionId}`);
+        const session = data.session;
+        const messages = data.messages || [];
+
+        const modal = document.getElementById('history-chat-modal');
+        const content = document.getElementById('history-chat-content');
+
+        // 获取章节标题
+        let chapterTitle = `第 ${session.chapter_index + 1} 章`;
+        if (AppState.currentCourseId) {
+            try {
+                const courseData = await API.get(`/api/courses/${AppState.currentCourseId}`);
+                const chapter = courseData.chapters?.find(c => c.idx === session.chapter_index);
+                if (chapter?.title) chapterTitle = chapter.title;
+            } catch(e) {}
+        }
+
+        // 会话头部信息
+        const dateStr = session.started_at ? new Date(session.started_at).toLocaleString('zh-CN', {
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit'
+        }) : '未知';
+        const duration = session.total_duration || 0;
+
+        let headerHtml = `
+            <div class="history-detail-header">
+                <div class="history-detail-back" onclick="showChatHistory()">
+                    ‹ 返回历史列表
+                </div>
+                <div style="display:flex;align-items:center;gap:12px;margin:16px 0">
+                    <span style="font-size:32px">${session.teacher_info?.emoji || '🎓'}</span>
+                    <div>
+                        <div style="font-size:18px;font-weight:700">${session.teacher_info?.name || '导师'}</div>
+                        <div style="font-size:13px;color:var(--text-secondary)">${session.teacher_info?.style || ''}</div>
+                    </div>
+                </div>
+                <div style="display:flex;flex-wrap:wrap;gap:8px;font-size:13px;color:var(--text-secondary)">
+                    <span>📖 ${chapterTitle}</span>
+                    <span>· 💬 ${session.total_rounds || 0} 轮对话</span>
+                    ${duration ? `<span>· ⏱️ ${duration} 分钟</span>` : ''}
+                    <span>· 📅 ${dateStr}</span>
+                </div>
+            </div>`;
+
+        // 对话消息
+        let messagesHtml = '';
+        if (messages.length === 0) {
+            messagesHtml = '<div class="empty-state" style="padding:40px"><p>暂无对话消息</p></div>';
+        } else {
+            messagesHtml = '<div class="history-chat-messages">';
+            messages.forEach(m => {
+                const isUser = m.role === 'user';
+                const stateLabel = m.state_marker ? getStateLabel(m.state_marker) : '';
+                const avatar = isUser ? '👤' : (session.teacher_info?.emoji || '🎓');
+                const time = m.created_at ? new Date(m.created_at).toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit'}) : '';
+
+                messagesHtml += `
+                    <div class="history-message ${isUser ? 'history-message-user' : 'history-message-assistant'}">
+                        <div class="history-message-avatar">${avatar}</div>
+                        <div class="history-message-bubble ${isUser ? 'user' : 'assistant'}">
+                            ${!isUser && stateLabel ? `<div class="history-state-badge">${stateLabel}</div>` : ''}
+                            <div class="history-message-text">${escapeHtml(m.content)}</div>
+                            ${time ? `<div class="history-message-time">${time}</div>` : ''}
+                        </div>
+                    </div>`;
+            });
+            messagesHtml += '</div>';
+        }
+
+        content.innerHTML = headerHtml + messagesHtml;
+        modal.scrollTop = 0;
+    } catch (e) {
+        showToast('加载历史对话失败: ' + e.message, 'error');
+    }
+}
+
+function closeHistoryChatModal() {
+    document.getElementById('history-chat-modal').classList.remove('active');
+    // 重置弹窗标题
+    document.getElementById('history-chat-modal').querySelector('h2').textContent = '💬 历史对话';
+}
+
+function getStateLabel(state) {
+    const labels = {
+        'SHARE': '📖 教师分享',
+        'PROBE': '❓ 教师提问',
+        'EXPLAIN': '📚 教师讲解',
+        'GUIDE': '🧭 教师引导',
+        'END': '🏁 结束',
+        'EVAL': '🔍 评估'
+    };
+    return labels[state] || state;
+}
+
+async function autoPreviewNextChapter(courseId, currentIdx, chapters) {
+    try {
+        const nextChapter = chapters.find(c => c.idx === currentIdx + 1);
+        if (!nextChapter) return;
+        // 异步预加载下一章内容（静默，不影响当前体验）
+        if (!nextChapter.is_loaded) {
+            API.post(`/api/courses/${courseId}/chapters/${currentIdx + 1}/load`, {}).catch(() => {});
+        }
+    } catch (e) {
+        // 静默失败
     }
 }
 
@@ -778,24 +1296,46 @@ function connectWebSocket(sessionId) {
         } else if (msg.state === 'WAIT_USER') {
             document.getElementById('chat-input').disabled = false;
             document.getElementById('send-btn').disabled = false;
+            document.getElementById('mastered-btn').style.display = 'block';
             document.getElementById('chat-status').textContent = '等待你的回答...';
             document.getElementById('chat-input').focus();
         } else if (msg.state === 'EXPLAIN' || msg.state === 'GUIDE') {
             appendStreamContent(msg.state, msg.content);
         } else if (msg.state === 'END') {
             // END消息内容显示
+        } else if (msg.state === 'MASTERED_SKIPPED') {
+            // 快速跳过成功，自动标记已掌握
+            if (msg.syllabus_id) {
+                showToast('✅ 已标记为掌握，跳过到下一题', 'success');
+            }
         } else if (msg.state === 'SESSION_END') {
-            document.getElementById('chat-status').textContent = '课程结束';
+            document.getElementById('chat-status').textContent = '🎉 课程结束！';
             document.getElementById('chat-input').disabled = true;
             document.getElementById('send-btn').disabled = true;
+            document.getElementById('mastered-btn').style.display = 'none';
             AppState.isChatting = false;
-            showToast('本节课学习结束！正在生成学习记录...', 'success');
-            // 等待课后闭环完成后刷新数据
-            setTimeout(async () => {
-                await openCourse(AppState.currentCourseId);
-                // 切换到课后产出物标签，显示最新内容
-                showToast('学习记录已生成！', 'success');
-            }, 3000);
+
+            // 显示课后处理进度
+            showPostClassProgress();
+
+            // 刷新页面数据
+            openCourse(AppState.currentCourseId);
+
+            // 等待课后闭环完成后，弹出苏格拉底预演
+            waitForPostClassComplete().catch(() => {}).then(async () => {
+                const chIdx = AppState.currentChapterIndex;
+                if (chIdx !== undefined && chIdx !== null) {
+                    try {
+                        const preview = await API.get(`/api/courses/${AppState.currentCourseId}/chapters/${chIdx}/preview`);
+                        if (preview.preview || (preview.questions && preview.questions.length > 0)) {
+                            showSocraticPreview(preview);
+                        }
+                    } catch (e) {
+                        // 静默失败
+                    }
+                }
+            });
+            showToast('学习记录已生成中...', 'success');
         }
     };
 
@@ -829,11 +1369,14 @@ function appendStreamContent(state, content) {
     let lastMsg = container.lastElementChild;
     const teacher = getTeacherInfo();
 
+    // 初始化或检查当前消息的状态
     if (!lastMsg || lastMsg.dataset.state !== state || lastMsg.dataset.finalized === 'true') {
         const div = document.createElement('div');
         div.className = 'message';
         div.dataset.state = state;
         div.dataset.finalized = 'false';
+        div.dataset.inThink = 'false';
+        div.dataset.thinkBuffer = '';
 
         const stateLabels = {
             'SHARE': '分享',
@@ -850,6 +1393,13 @@ function appendStreamContent(state, content) {
             <div class="bubble assistant">
                 <div class="state-badge">${roleName}</div>
                 <div class="msg-content"></div>
+                <div class="thinking-fold" style="display:none">
+                    <div class="thinking-header" onclick="toggleThinking(this.parentElement)">
+                        <span>🤔 导师思考过程</span>
+                        <span class="thinking-toggle">▼ 点击展开</span>
+                    </div>
+                    <div class="thinking-content"></div>
+                </div>
             </div>
         `;
         container.appendChild(div);
@@ -857,8 +1407,82 @@ function appendStreamContent(state, content) {
     }
 
     const contentDiv = lastMsg.querySelector('.msg-content');
-    contentDiv.textContent += content;
+    const thinkingFold = lastMsg.querySelector('.thinking-fold');
+    const thinkingContent = lastMsg.querySelector('.thinking-content');
+
+    // 处理思考标签（可能跨多个chunk）
+    let buffer = lastMsg.dataset.thinkBuffer + content;
+
+    // 检查是否进入或退出思考模式
+    const inThink = lastMsg.dataset.inThink === 'true';
+
+    if (buffer.includes('<think>')) {
+        // 进入思考模式
+        lastMsg.dataset.inThink = 'true';
+
+        // 提取思考前的正常内容
+        const parts = buffer.split('<think>');
+        if (parts[0]) {
+            contentDiv.textContent += parts[0];
+        }
+
+        // 更新buffer为思考内容部分
+        buffer = parts.slice(1).join('<think>');
+
+        // 检查是否有思考结束标签
+        if (buffer.includes('</think>')) {
+            const thinkParts = buffer.split('</think>');
+            lastMsg.dataset.thinkBuffer = thinkParts.slice(1).join('</think>'); // 剩余内容
+            const thinkText = thinkParts[0];
+            if (thinkText) {
+                thinkingContent.textContent += thinkText;
+            }
+            thinkingFold.style.display = 'block';
+            lastMsg.dataset.inThink = 'false';
+        } else {
+            // 思考内容还在进行中，缓存起来
+            lastMsg.dataset.thinkBuffer = buffer;
+        }
+    } else if (inThink && buffer.includes('</think>')) {
+        // 继续在思考中，但遇到了结束标签
+        const thinkParts = buffer.split('</think>');
+        thinkingContent.textContent += thinkParts[0];
+        thinkingFold.style.display = 'block';
+        lastMsg.dataset.thinkBuffer = thinkParts.slice(1).join('</think>');
+        lastMsg.dataset.inThink = 'false';
+
+        // 递归处理剩余内容
+        if (lastMsg.dataset.thinkBuffer) {
+            appendStreamContent(state, '');
+        }
+    } else if (inThink) {
+        // 继续在思考中，追加到思考内容
+        thinkingContent.textContent += buffer;
+        lastMsg.dataset.thinkBuffer = '';
+    } else {
+        // 正常内容
+        contentDiv.textContent += buffer;
+        lastMsg.dataset.thinkBuffer = '';
+    }
+
     container.scrollTop = container.scrollHeight;
+}
+
+// 切换思考内容的展开/折叠
+function toggleThinking(foldEl) {
+    const content = foldEl.querySelector('.thinking-content');
+    const toggle = foldEl.querySelector('.thinking-toggle');
+    const header = foldEl.querySelector('.thinking-header');
+
+    if (content.style.display === 'none') {
+        content.style.display = 'block';
+        toggle.textContent = '▲ 点击收起';
+        header.classList.add('expanded');
+    } else {
+        content.style.display = 'none';
+        toggle.textContent = '▼ 点击展开';
+        header.classList.remove('expanded');
+    }
 }
 
 function sendChatMessage() {
@@ -898,7 +1522,166 @@ function endChat() {
     showToast('对话已结束');
 }
 
+// ==================== 课后闭环进度展示 ====================
+let postClassProgressTimer = null;
+
+function showPostClassProgress() {
+    // 在聊天区域底部插入进度提示
+    const container = document.getElementById('chat-messages');
+    const progressDiv = document.createElement('div');
+    progressDiv.id = 'post-class-progress';
+    progressDiv.className = 'post-class-progress';
+    progressDiv.innerHTML = `
+        <div class="post-class-progress-title">
+            🎉 本节课学习完成！
+        </div>
+        <div class="post-class-progress-steps">
+            <div class="progress-step" id="step-profile">
+                <span class="step-icon">⏳</span>
+                <span class="step-text">分析学习画像...</span>
+            </div>
+            <div class="progress-step" id="step-diary">
+                <span class="step-icon">⏳</span>
+                <span class="step-text">生成学习日记...</span>
+            </div>
+            <div class="progress-step" id="step-group-chat">
+                <span class="step-icon">⏳</span>
+                <span class="step-text">记录教师点评...</span>
+            </div>
+            <div class="progress-step" id="step-summary">
+                <span class="step-icon">⏳</span>
+                <span class="step-text">生成复习总结...</span>
+            </div>
+        </div>
+        <div class="post-class-progress-hint">
+            💡 您可以先查看课程主页，已生成的记录会逐步显示
+        </div>
+        <button class="btn btn-sm btn-primary" style="margin-top:8px" onclick="navigateToCourseDetail()">
+            📖 返回课程主页
+        </button>
+    `;
+    container.appendChild(progressDiv);
+    container.scrollTop = container.scrollHeight;
+
+    // 轮询检查每个步骤的完成状态
+    postClassProgressTimer = setInterval(updatePostClassProgress, 1500);
+}
+
+async function updatePostClassProgress() {
+    try {
+        const sessionId = AppState.currentSessionId;
+        if (!sessionId) return;
+
+        // 获取日记、群聊、总结
+        const diaryData = await API.get(`/api/courses/${AppState.currentCourseId}/diaries`);
+        const groupChatData = await API.get(`/api/courses/${AppState.currentCourseId}/group-chats`);
+        const summaryData = await API.get(`/api/courses/${AppState.currentCourseId}/summaries`);
+
+        // 检查各项是否完成
+        const hasDiary = (diaryData.diaries || []).some(d => d.session_id === sessionId);
+        const hasGroupChat = (groupChatData.group_chats || []).some(g => g.session_id === sessionId);
+        const hasSummary = (summaryData.summaries || []).some(s => s.session_id === sessionId);
+
+        updateStep('step-profile', true);
+        if (hasDiary) updateStep('step-diary', true);
+        if (hasGroupChat) updateStep('step-group-chat', true);
+        if (hasSummary) updateStep('step-summary', true);
+
+        // 全部完成后停止轮询
+        if (hasDiary && hasGroupChat && hasSummary) {
+            clearInterval(postClassProgressTimer);
+            postClassProgressTimer = null;
+            // 显示完成状态
+            const progressDiv = document.getElementById('post-class-progress');
+            if (progressDiv) {
+                progressDiv.classList.add('completed');
+                const hint = progressDiv.querySelector('.post-class-progress-hint');
+                if (hint) hint.innerHTML = '✅ 学习记录已生成完毕！';
+            }
+        }
+    } catch (e) {
+        console.warn('检查课后进度失败', e);
+    }
+}
+
+function updateStep(stepId, completed) {
+    const step = document.getElementById(stepId);
+    if (!step) return;
+    if (completed) {
+        step.classList.add('completed');
+        step.querySelector('.step-icon').textContent = '✅';
+        step.querySelector('.step-text').style.color = 'var(--text-secondary)';
+    }
+}
+
+function navigateToCourseDetail() {
+    // 立即跳转课程主页（不等生成完成）
+    clearInterval(postClassProgressTimer);
+    postClassProgressTimer = null;
+    openCourse(AppState.currentCourseId);
+}
+
+// 等待课后闭环完成（最多30秒）
+async function waitForPostClassComplete() {
+    const startTime = Date.now();
+    const maxWait = 30000;
+    while (Date.now() - startTime < maxWait) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        try {
+            const data = await API.get(`/api/courses/${AppState.currentCourseId}`);
+            // 检查是否可以判断完成（通过刷新页面来检查日记/总结）
+            const diaryData = await API.get(`/api/courses/${AppState.currentCourseId}/diaries`);
+            const summaryData = await API.get(`/api/courses/${AppState.currentCourseId}/summaries`);
+            if (diaryData.diaries && summaryData.summaries) {
+                // 认为完成
+                return true;
+            }
+        } catch (e) {
+            // 忽略
+        }
+    }
+    return false;
+}
+
+// 快速标记已掌握并跳过当前问题
+async function sendMasteredQuick() {
+    const input = document.getElementById('chat-input');
+    const text = "我会了，这个知识点我已经掌握，继续下一个。";
+
+    if (!AppState.ws || AppState.ws.readyState !== WebSocket.OPEN) return;
+
+    // 添加用户消息到界面
+    const container = document.getElementById('chat-messages');
+    const userDiv = document.createElement('div');
+    userDiv.className = 'message';
+    userDiv.innerHTML = `
+        <div class="avatar user">👤</div>
+        <div class="bubble user">${escapeHtml(text)}</div>
+    `;
+    container.appendChild(userDiv);
+    container.scrollTop = container.scrollHeight;
+
+    // 隐藏"我已掌握"按钮
+    document.getElementById('mastered-btn').style.display = 'none';
+
+    // 标记上一条AI消息为已完成
+    const lastMsg = container.lastElementChild.previousElementSibling;
+    if (lastMsg) lastMsg.dataset.finalized = 'true';
+
+    // 发送到WebSocket（发送特殊标记让后端知道这是快速跳过）
+    AppState.ws.send(JSON.stringify({ content: text, quick_mastered: true }));
+
+    input.value = '';
+    input.disabled = true;
+    document.getElementById('send-btn').disabled = true;
+    document.getElementById('chat-status').textContent = 'AI正在思考...';
+}
+
 function escapeHtml(text) {
+    if (!text) return text;
+    // 移除思考标签，兼容带思考模式的模型
+    text = text.replace(/<think>[\s\S]*?<\/think>/gi, '');
+    text = text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
@@ -1041,7 +1824,7 @@ function renderPostClass(data) {
                     <div style="font-weight:500;margin-bottom:4px">📝 ${d.title}</div>
                     <div style="font-size:11px;color:#b2bec3;white-space:nowrap">${fmtTime(d.created_at)}</div>
                 </div>
-                <div style="font-size:13px;color:#636e72">${d.content.slice(0, 300)}</div>
+                <div style="font-size:13px;color:#636e72">${escapeHtml(d.content).slice(0, 300)}</div>
             </div>`
         ).join('');
     } else {
@@ -1059,8 +1842,8 @@ function renderPostClass(data) {
                     <div style="font-weight:500;margin-bottom:4px">${role.emoji} ${role.name}</div>
                     <div style="font-size:11px;color:#b2bec3;white-space:nowrap">${fmtTime(g.created_at)}</div>
                 </div>
-                <div style="font-size:13px">${g.message}</div>
-                ${g.quoted_user_text ? `<div style="font-size:11px;color:#636e72;margin-top:4px;border-left:2px solid var(--warning);padding-left:8px">引用: "${g.quoted_user_text.slice(0, 60)}"</div>` : ''}
+                <div style="font-size:13px">${escapeHtml(g.message)}</div>
+                ${g.quoted_user_text ? `<div style="font-size:11px;color:#636e72;margin-top:4px;border-left:2px solid var(--warning);padding-left:8px">引用: "${escapeHtml(g.quoted_user_text.slice(0, 60))}"</div>` : ''}
             </div>`;
         }).join('');
     } else {
@@ -1076,7 +1859,7 @@ function renderPostClass(data) {
                     <div style="font-size:13px;font-weight:500">📋 复习总结</div>
                     <div style="font-size:11px;color:#b2bec3;white-space:nowrap">${fmtTime(s.created_at)}</div>
                 </div>
-                <div style="font-size:13px;white-space:pre-wrap">${s.content}</div>
+                <div style="font-size:13px;white-space:pre-wrap">${escapeHtml(s.content)}</div>
             </div>`
         ).join('');
     } else {
@@ -1201,7 +1984,7 @@ async function loadLearningHistory() {
             if (h.group_chats && h.group_chats.length > 0) {
                 outputsHtml += h.group_chats.map(g => {
                     const tName = AppState.roles[g.teacher_role_id]?.name || g.teacher_role_id;
-                    return `<div style="margin:4px 0;font-size:12px">💬 ${tName}: ${g.message.slice(0, 60)}... <span style="color:#b2bec3">${fmtTime(g.created_at)}</span></div>`;
+                    return `<div style="margin:4px 0;font-size:12px">💬 ${tName}: ${escapeHtml(g.message).slice(0, 60)}... <span style="color:#b2bec3">${fmtTime(g.created_at)}</span></div>`;
                 }).join('');
             }
             if (h.summaries && h.summaries.length > 0) {
@@ -1894,7 +2677,9 @@ async function loadAllSyllabusData() {
                 '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">' +
                 '<div><span style="font-size:12px;color:var(--accent);font-weight:500">第' + (idx + 1) + '个知识点</span>' +
                 '<span style="font-size:12px;color:#636e72;margin-left:8px">' + chTitle + '</span></div>' +
-                '<span style="font-size:11px;padding:2px 8px;border-radius:4px;background:' + bg + ';color:' + cl + ';border:1px solid ' + bd + '">' + st + '</span></div>' +
+                '<div style="display:flex;align-items:center;gap:6px">' +
+                (s.status === 'mastered' ? '' : '<button class="btn btn-xs" style="font-size:10px;padding:2px 8px;border:none;background:var(--success);color:#fff;border-radius:4px;cursor:pointer" onclick="event.stopPropagation();markSyllabusMastered(' + s.id + ', this)">✓ 我已掌握</button>') +
+                '<span style="font-size:11px;padding:2px 8px;border-radius:4px;background:' + bg + ';color:' + cl + ';border:1px solid ' + bd + '">' + st + '</span></div></div>' +
                 '<div class="syllabus-item" style="font-size:14px;color:var(--text-primary);line-height:1.6;cursor:pointer" data-id="' + s.id + '" data-desc="' + escapeHtml(s.description) + '">' +
                 escapeHtml(s.description) + '</div></div>';
         }).join('');
@@ -1917,8 +2702,75 @@ function viewSyllabusDetail(syllabusId, description) {
     el.onclick = function(e) { e.stopPropagation(); };
     el.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px"><h2>📖 知识点详情</h2><button class="btn btn-outline btn-sm" onclick="this.closest(\'.modal-overlay\').remove()">✕</button></div>' +
         '<div style="font-size:16px;line-height:1.8;color:var(--text-primary);margin-bottom:24px;padding:20px;background:var(--bg-primary);border-radius:var(--radius-sm);border-left:4px solid var(--accent)">' + escapeHtml(description) + '</div>' +
-        '<div style="display:flex;justify-content:flex-end;gap:8px"><button class="btn btn-outline" onclick="this.closest(\'.modal-overlay\').remove()">关闭</button></div>';
+        '<div style="display:flex;justify-content:flex-end;gap:8px">' +
+        '<button class="btn btn-outline" onclick="this.closest(\'.modal-overlay\').remove()">关闭</button>' +
+        '<button class="btn btn-primary" onclick="markSyllabusMastered(' + syllabusId + ', this)">✅ 我已掌握</button>' +
+        '</div>';
     modal.appendChild(el);
     document.body.appendChild(modal);
 }
+
+async function markSyllabusMastered(syllabusId, btn) {
+    if (!syllabusId) return;
+    try {
+        await API.patch('/api/syllabus/' + syllabusId, { status: 'mastered' });
+        showToast('🎉 已标记为掌握！', 'success');
+        // 关闭弹窗
+        var modal = btn.closest('.modal-overlay');
+        if (modal) modal.remove();
+        // 刷新课程页面
+        loadCourseDetail(AppState.currentCourseId);
+    } catch (e) {
+        showToast('标记失败', 'error');
+    }
+}
+
+// ==================== 苏格拉底式预演弹窗 ====================
+function showSocraticPreview(preview) {
+    if (!preview || (!preview.preview && (!preview.questions || preview.questions.length === 0))) return;
+
+    const questions = preview.questions || [];
+    const nextTitle = preview.next_title || '下一章';
+
+    // 构建弹窗内容
+    let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <h2 style="margin:0">🎯 苏格拉底式预演</h2>
+        <button class="btn btn-outline btn-sm" onclick="this.closest('.modal-overlay').remove()">✕</button>
+    </div>
+    <div style="background:linear-gradient(135deg, #667eea20, #764ba220);border-radius:var(--radius-sm);padding:20px;margin-bottom:16px">
+        <div style="font-size:14px;color:var(--text-secondary);margin-bottom:8px">下一章：<strong>${escapeHtml(nextTitle)}</strong></div>
+        <div style="font-size:15px;line-height:1.7;color:var(--text-primary)">
+            🧠 带着以下问题去学习，效率会更高：
+        </div>
+    </div>`;
+
+    if (questions.length > 0) {
+        html += '<div style="margin-top:12px">';
+        questions.forEach((q, i) => {
+            html += `<div style="background:var(--bg-secondary);border-radius:var(--radius-sm);padding:14px 16px;margin-bottom:8px;border-left:3px solid var(--accent)">
+                <div style="font-size:13px;color:var(--accent);font-weight:500;margin-bottom:4px">🤔 思考题 ${i + 1}</div>
+                <div style="font-size:14px;line-height:1.6">${escapeHtml(q)}</div>
+            </div>`;
+        });
+        html += '</div>';
+    }
+
+    html += `<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
+        <button class="btn btn-primary" onclick="this.closest('.modal-overlay').remove()">好的，我知道了</button>
+    </div>`;
+
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay active';
+    modal.style.zIndex = '2002';
+    const container = document.createElement('div');
+    container.className = 'modal';
+    container.style.maxWidth = '520px';
+    container.onclick = function(e) { e.stopPropagation(); };
+    container.innerHTML = html;
+    modal.appendChild(container);
+    document.body.appendChild(modal);
+}
+
+// escapeHtml 已在第1009行定义，此处复用
+
 

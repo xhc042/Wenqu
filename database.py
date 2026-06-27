@@ -33,6 +33,7 @@ def init_db():
             title TEXT NOT NULL,
             source_type TEXT NOT NULL,  -- file/url/text/recommendation
             source_path TEXT,
+            reading_mode TEXT DEFAULT 'standard',  -- speed/standard/deep
             total_chapters INTEGER DEFAULT 0,
             current_teacher TEXT,
             current_depth TEXT DEFAULT 'standard',  -- basic/standard/deep
@@ -48,6 +49,11 @@ def init_db():
             title TEXT NOT NULL,
             summary TEXT,
             content_slice TEXT,
+            content_full TEXT,          -- 懒加载后的完整正文
+            is_loaded INTEGER DEFAULT 1, -- 0=未加载占位, 1=正文已加载
+            parent_idx INTEGER DEFAULT -1, -- -1=根章节
+            level INTEGER DEFAULT 0,     -- 0=卷/部, 1=章, 2=节
+            sort_order TEXT DEFAULT '',  -- "1.1.2" 排序键
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (course_id) REFERENCES courses(id)
         );
@@ -231,17 +237,46 @@ def init_db():
     finally:
         conn.close()
 
+    # ===== 数据库迁移：为旧表补上新列 =====
+    _migrate_schema()
+
+
+def _migrate_schema():
+    """增量迁移已有表，添加新字段"""
+    conn = get_conn()
+    try:
+        # 检查 courses 表
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(courses)")}
+        if "reading_mode" not in cols:
+            conn.execute("ALTER TABLE courses ADD COLUMN reading_mode TEXT DEFAULT 'standard'")
+
+        # 检查 chapters 表
+        cols2 = {row["name"] for row in conn.execute("PRAGMA table_info(chapters)")}
+        for col, col_def in [
+            ("content_full", "TEXT DEFAULT ''"),
+            ("is_loaded", "INTEGER DEFAULT 1"),
+            ("parent_idx", "INTEGER DEFAULT -1"),
+            ("level", "INTEGER DEFAULT 0"),
+            ("sort_order", "TEXT DEFAULT ''"),
+        ]:
+            if col not in cols2:
+                conn.execute(f"ALTER TABLE chapters ADD COLUMN {col} {col_def}")
+
+        conn.commit()
+    finally:
+        conn.close()
+
 
 # ==================== CRUD 操作 ====================
 
-def create_course(title: str, source_type: str, source_path: str = "") -> str:
+def create_course(title: str, source_type: str, source_path: str = "", reading_mode: str = "standard") -> str:
     """创建课程，返回课程ID"""
     course_id = str(uuid.uuid4())[:8]
     conn = get_conn()
     try:
         conn.execute(
-            "INSERT INTO courses (id, title, source_type, source_path) VALUES (?, ?, ?, ?)",
-            (course_id, title, source_type, source_path),
+            "INSERT INTO courses (id, title, source_type, source_path, reading_mode) VALUES (?, ?, ?, ?, ?)",
+            (course_id, title, source_type, source_path, reading_mode),
         )
         # 初始化学习画像
         conn.execute(
@@ -303,6 +338,15 @@ def delete_course(course_id: str) -> bool:
         conn.close()
 
 
+def update_course_reading_mode(course_id: str, mode: str):
+    conn = get_conn()
+    try:
+        conn.execute("UPDATE courses SET reading_mode=? WHERE id=?", (mode, course_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def update_course_depth(course_id: str, depth: str):
     conn = get_conn()
     try:
@@ -332,16 +376,38 @@ def update_course_teacher(course_id: str, teacher: str):
 
 # ==================== 章节 ====================
 
-def add_chapter(course_id: str, idx: int, title: str, content_slice: str = "", summary: str = "") -> int:
+def add_chapter(course_id: str, idx: int, title: str, content_slice: str = "", summary: str = "",
+                content_full: str = "", is_loaded: int = 1, parent_idx: int = -1,
+                level: int = 0, sort_order: str = "") -> int:
     conn = get_conn()
     try:
         cur = conn.execute(
-            "INSERT INTO chapters (course_id, idx, title, content_slice, summary) VALUES (?, ?, ?, ?, ?)",
-            (course_id, idx, title, content_slice, summary),
+            """INSERT INTO chapters (course_id, idx, title, content_slice, summary, content_full, is_loaded, parent_idx, level, sort_order)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (course_id, idx, title, content_slice, summary, content_full, is_loaded, parent_idx, level, sort_order),
         )
         conn.execute("UPDATE courses SET total_chapters = (SELECT COUNT(*) FROM chapters WHERE course_id=?) WHERE id=?", (course_id, course_id))
         conn.commit()
         return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def update_chapter_content(course_id: str, chapter_idx: int, content_full: str, summary: str = ""):
+    """懒加载完成时更新章节的完整内容和摘要"""
+    conn = get_conn()
+    try:
+        if summary:
+            conn.execute(
+                "UPDATE chapters SET content_full=?, summary=?, is_loaded=1 WHERE course_id=? AND idx=?",
+                (content_full, summary, course_id, chapter_idx),
+            )
+        else:
+            conn.execute(
+                "UPDATE chapters SET content_full=?, is_loaded=1 WHERE course_id=? AND idx=?",
+                (content_full, course_id, chapter_idx),
+            )
+        conn.commit()
     finally:
         conn.close()
 

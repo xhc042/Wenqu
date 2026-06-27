@@ -892,6 +892,10 @@ function endChat() {
 }
 
 function escapeHtml(text) {
+    if (!text) return text;
+    // 移除思考标签，兼容带思考模式的模型
+    text = text.replace(/<think>[\s\S]*?<\/think>/gi, '');
+    text = text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
@@ -1034,7 +1038,7 @@ function renderPostClass(data) {
                     <div style="font-weight:500;margin-bottom:4px">📝 ${d.title}</div>
                     <div style="font-size:11px;color:#b2bec3;white-space:nowrap">${fmtTime(d.created_at)}</div>
                 </div>
-                <div style="font-size:13px;color:#636e72">${d.content.slice(0, 300)}</div>
+                <div style="font-size:13px;color:#636e72">${escapeHtml(d.content).slice(0, 300)}</div>
             </div>`
         ).join('');
     } else {
@@ -1052,8 +1056,8 @@ function renderPostClass(data) {
                     <div style="font-weight:500;margin-bottom:4px">${role.emoji} ${role.name}</div>
                     <div style="font-size:11px;color:#b2bec3;white-space:nowrap">${fmtTime(g.created_at)}</div>
                 </div>
-                <div style="font-size:13px">${g.message}</div>
-                ${g.quoted_user_text ? `<div style="font-size:11px;color:#636e72;margin-top:4px;border-left:2px solid var(--warning);padding-left:8px">引用: "${g.quoted_user_text.slice(0, 60)}"</div>` : ''}
+                <div style="font-size:13px">${escapeHtml(g.message)}</div>
+                ${g.quoted_user_text ? `<div style="font-size:11px;color:#636e72;margin-top:4px;border-left:2px solid var(--warning);padding-left:8px">引用: "${escapeHtml(g.quoted_user_text.slice(0, 60))}"</div>` : ''}
             </div>`;
         }).join('');
     } else {
@@ -1069,7 +1073,7 @@ function renderPostClass(data) {
                     <div style="font-size:13px;font-weight:500">📋 复习总结</div>
                     <div style="font-size:11px;color:#b2bec3;white-space:nowrap">${fmtTime(s.created_at)}</div>
                 </div>
-                <div style="font-size:13px;white-space:pre-wrap">${s.content.slice(0, 500)}</div>
+                <div style="font-size:13px;white-space:pre-wrap">${escapeHtml(s.content).slice(0, 500)}</div>
             </div>`
         ).join('');
     } else {

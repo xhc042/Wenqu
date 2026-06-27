@@ -1,6 +1,7 @@
 """
 问渠（Wenqu）v1.1 LLM API客户端模块
 支持OpenAI兼容接口的流式和非流式调用
+支持多模型层级（fast / balanced / flagship）调度
 """
 
 import json
@@ -9,18 +10,19 @@ from typing import AsyncGenerator, Optional, List, Dict, Any
 
 import httpx
 
-from config import get_llm_config, DEPTH_CONFIG
+from config import get_llm_config, get_model_tier_config, DEPTH_CONFIG
 
 
 class LLMClient:
-    """LLM API客户端"""
+    """LLM API客户端（单模型）"""
 
-    def __init__(self):
-        cfg = get_llm_config()
+    def __init__(self, tier: str = "balanced"):
+        cfg = get_model_tier_config(tier) if tier != "default" else get_llm_config()
         self.api_key = cfg["api_key"]
         self.base_url = cfg["base_url"].rstrip("/")
         self.model = cfg["model"]
-        self.timeout = cfg["timeout"]
+        self.timeout = cfg.get("timeout", 60)
+        self.tier = tier
 
     def _headers(self) -> dict:
         return {
@@ -54,8 +56,8 @@ class LLMClient:
                     },
                 ) as resp:
                     if resp.status_code != 200:
-                        error_text = await resp.aread()
-                        yield f"⚠️ API错误 ({resp.status_code}): 网络好像有点问题，要不我们换个话题试试？"
+                        await resp.aread()
+                        yield f"⚠️ API错误 ({resp.status_code})"
                         return
 
                     async for line in resp.aiter_lines():
@@ -72,9 +74,9 @@ class LLMClient:
                             except json.JSONDecodeError:
                                 continue
             except httpx.TimeoutException:
-                yield "⏳ API请求超时了，网络好像有点问题，要不我们换个话题试试？"
-            except Exception as e:
-                yield f"⚠️ 网络好像有点问题，要不我们换个话题试试？"
+                yield "⏳ API请求超时了"
+            except Exception:
+                yield "⚠️ 网络好像有点问题"
 
     async def chat(
         self,
@@ -104,14 +106,14 @@ class LLMClient:
                     json=body,
                 )
                 if resp.status_code != 200:
-                    return "⚠️ 网络好像有点问题，要不我们换个话题试试？"
+                    return "⚠️ API错误"
                 data = resp.json()
                 return data["choices"][0]["message"]["content"]
             except Exception:
-                return "⚠️ 网络好像有点问题，要不我们换个话题试试？"
+                return "⚠️ 网络好像有点问题"
 
     async def chat_json(self, messages: List[dict], temperature: float = 0.3) -> dict:
-        """非流式对话，返回JSON对象（用于EVAL状态）"""
+        """非流式对话，返回JSON对象"""
         text = await self.chat(
             messages=messages,
             temperature=temperature,
@@ -159,8 +161,7 @@ class LLMClient:
                 elif resp.status_code == 404:
                     return {"success": False, "message": f"模型 '{model}' 不存在或接口地址错误 (404)"}
                 else:
-                    error_text = resp.text[:200]
-                    return {"success": False, "message": f"服务器返回错误 ({resp.status_code}): {error_text}"}
+                    return {"success": False, "message": f"服务器返回错误 ({resp.status_code})"}
             except httpx.TimeoutException:
                 return {"success": False, "message": "连接超时，请检查 base_url 是否正确"}
             except httpx.ConnectError:
@@ -169,7 +170,68 @@ class LLMClient:
                 return {"success": False, "message": f"连接失败: {str(e)[:100]}"}
 
 
-llm = LLMClient()
+# ==================== 多模型分级调度 ====================
+
+class MultiModelClient:
+    """多模型分级客户端：按 tier 自动分发到不同模型"""
+
+    def __init__(self):
+        self._instances: Dict[str, LLMClient] = {}
+
+    def _get_client(self, tier: str) -> LLMClient:
+        """获取或创建指定层级的客户端实例"""
+        if tier not in self._instances:
+            self._instances[tier] = LLMClient(tier=tier)
+        return self._instances[tier]
+
+    async def chat(self, tier: str, messages: List[dict],
+                   temperature: float = 0.7, max_tokens: int = 2048,
+                   response_format: Optional[dict] = None) -> str:
+        """按层级发送非流式对话"""
+        return await self._get_client(tier).chat(
+            messages, temperature, max_tokens, response_format
+        )
+
+    async def chat_json(self, tier: str, messages: List[dict],
+                        temperature: float = 0.3) -> dict:
+        """按层级发送 JSON 对话"""
+        return await self._get_client(tier).chat_json(messages, temperature)
+
+    async def chat_stream(self, tier: str, messages: List[dict],
+                          temperature: float = 0.7, max_tokens: int = 2048
+                          ) -> AsyncGenerator[str, None]:
+        """按层级发送流式对话"""
+        async for token in self._get_client(tier).chat_stream(
+            messages, temperature, max_tokens
+        ):
+            yield token
+
+    def get_default_tier(self) -> str:
+        """获取当前主配置建议的默认层级"""
+        cfg = get_llm_config()
+        model_lower = cfg.get("model", "").lower()
+        # 自动推断层级
+        if any(k in model_lower for k in ["haiku", "mini", "flash", "gemini-1.5-flash"]):
+            return "fast"
+        elif any(k in model_lower for k in ["sonnet", "gpt-4o", "gemini-2.0", "qwen-max", "deepseek-chat"]):
+            return "balanced"
+        elif any(k in model_lower for k in ["opus", "o1", "o3", "claude-3.5", "gemini-2.5"]):
+            return "flagship"
+        return "balanced"
+
+    def refresh_tier(self, tier: str):
+        """刷新指定层级的客户端（配置变更后调用）"""
+        if tier in self._instances:
+            del self._instances[tier]
+
+    def refresh_all(self):
+        """刷新所有层级客户端"""
+        self._instances.clear()
+
+
+# 全局单例
+llm = LLMClient(tier="default")
+multi_llm = MultiModelClient()
 
 
 def get_depth_prompt(depth: str) -> dict:
@@ -185,7 +247,6 @@ def build_system_prompt(role_id: str, depth: str, sliders: dict, course_title: s
     from pathlib import Path
     from config import PROMPTS_DIR
 
-    # 读取角色Prompt
     prompt_path = PROMPTS_DIR / f"{role_id}.md"
     role_prompt = f"你是教师角色 {role_id}。"
     if prompt_path.exists():
@@ -193,7 +254,6 @@ def build_system_prompt(role_id: str, depth: str, sliders: dict, course_title: s
 
     depth_cfg = get_depth_prompt(depth)
 
-    # 滑块映射为参数
     slider_notes = []
     if sliders.get("strictness", 0) > 0:
         slider_notes.append("风格偏严谨：严格要求逻辑严密性，指出思维漏洞")

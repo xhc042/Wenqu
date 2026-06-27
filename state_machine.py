@@ -6,6 +6,7 @@
 """
 
 import json
+import re
 import asyncio
 from datetime import datetime
 from typing import Optional, AsyncGenerator, List
@@ -13,6 +14,25 @@ from typing import Optional, AsyncGenerator, List
 from llm_client import llm, build_system_prompt
 from config import FLOW_DETECTION, DEPTH_CONFIG
 import database as db
+
+
+def strip_thinking_tags(content: str) -> str:
+    """移除思考标签，兼容带思考模式的模型（如o1、Claude等）
+
+    处理以下格式：
+    - <think> 内容</think>
+    - <thinking> 内容 </thinking>
+    - 等等...
+    """
+    if not content:
+        return content
+    # 移除 <think>...</think> 标签及其内容
+    content = re.sub(r'<think>[\s\S]*?</think>', '', content, flags=re.IGNORECASE)
+    # 移除 <thinking>...</thinking> 标签及其内容
+    content = re.sub(r'<thinking>[\s\S]*?</thinking>', '', content, flags=re.IGNORECASE)
+    # 清理多余空白
+    content = re.sub(r'\n{3,}', '\n\n', content)
+    return content.strip()
 
 
 class DialogueStateMachine:
@@ -418,13 +438,13 @@ class DialogueStateMachine:
         await self._after_class_routines()
 
     async def _after_class_routines(self):
-        """课后闭环：自动触发各项产出物"""
+        """课后闭环：自动触发各项产出物（并行执行，缩短等待时间）"""
         errors = []
 
-        # 课后兜底：至少标记1条掌握项，让进度有变化
+        # 1. 同步操作：先执行（数据库操作很快）
+        # 课后兜底：至少标记1条掌握项
         try:
             self._auto_mark_syllabus()
-            # 如果仍然没有 mastered 项，再强升一条 in_progress → mastered
             refresh = db.get_syllabus_items(self.course_id)
             in_progress_items = [s for s in refresh
                                if s["chapter_index"] == self.chapter_index
@@ -436,26 +456,22 @@ class DialogueStateMachine:
         except Exception as e:
             errors.append(f"掌握项兜底标记失败: {e}")
 
-        try:
-            await self._update_profile()
-        except Exception as e:
-            errors.append(f"画像更新失败: {e}")
-        try:
-            await self._update_affinity()
-        except Exception as e:
-            errors.append(f"情感分更新失败: {e}")
-        try:
-            await self._generate_group_chat()
-        except Exception as e:
-            errors.append(f"群聊生成失败: {e}")
-        try:
-            await self._generate_diary()
-        except Exception as e:
-            errors.append(f"日记生成失败: {e}")
-        try:
-            await self._generate_summary()
-        except Exception as e:
-            errors.append(f"总结生成失败: {e}")
+        # 2. 并行执行 LLM 调用（大幅缩短等待时间）
+        import asyncio
+        results = await asyncio.gather(
+            self._update_profile(),
+            self._update_affinity(),
+            self._generate_group_chat(),
+            self._generate_diary(),
+            self._generate_summary(),
+            return_exceptions=True,
+        )
+
+        # 记录错误
+        task_names = ["画像更新", "情感分更新", "群聊生成", "日记生成", "总结生成"]
+        for i, r in enumerate(results):
+            if isinstance(r, Exception):
+                errors.append(f"{task_names[i]}失败: {r}")
 
         if errors:
             import logging
@@ -470,6 +486,11 @@ class DialogueStateMachine:
         if not user_msgs:
             return
 
+        # 清理消息中的思考标签，兼容带思考模式的模型
+        cleaned_msgs = [strip_thinking_tags(m.get("content", "")) for m in user_msgs[:5] if strip_thinking_tags(m.get("content", ""))]
+        if not cleaned_msgs:
+            return
+
         # 使用LLM分析
         analysis_prompt = f"""分析以下学生的课堂回答，总结出：
 1. strengths（强项）：学生掌握得好的领域
@@ -479,7 +500,7 @@ class DialogueStateMachine:
 每类最多3条，每条不超过20字。
 
 学生的回答：
-{chr(10).join(m['content'][:200] for m in user_msgs[:5])}
+{chr(10).join(c[:200] for c in cleaned_msgs)}
 
 返回JSON：
 {{"strengths": [...], "weaknesses": [...], "misunderstandings": [...]}}"""
@@ -529,7 +550,9 @@ class DialogueStateMachine:
         if not user_msgs:
             return
 
-        user_quote = user_msgs[-1]["content"][:100] if user_msgs else "（无用户发言）"
+        # 清理用户消息中的思考标签，兼容带思考模式的模型
+        user_quote_raw = user_msgs[-1]["content"] if user_msgs else ""
+        user_quote = strip_thinking_tags(user_quote_raw)[:200]
 
         for teacher_id in selected:
             dimension = GROUP_CHAT_DIMENSIONS.get(teacher_id, "一般点评")
@@ -553,9 +576,9 @@ class DialogueStateMachine:
                     {"role": "system", "content": f"你是{teacher_name}老师，你的点评风格是{dimension}。"},
                     {"role": "user", "content": prompt},
                 ])
-                msg = result.get("message", "")
+                msg = strip_thinking_tags(result.get("message", ""))
                 if msg:
-                    db.add_group_chat(self.course_id, self.session_id, teacher_id, msg, user_quote)
+                    db.add_group_chat(self.course_id, self.session_id, teacher_id, msg, user_quote[:100])
             except Exception:
                 pass
 
@@ -565,6 +588,13 @@ class DialogueStateMachine:
         chapter_title = self.chapter_info.get("title", f"第{self.chapter_index + 1}章")
         teacher_name = self.teacher_role_id
 
+        # 清理消息中的思考标签，兼容带思考模式的模型
+        cleaned_messages = []
+        for m in messages[-6:]:
+            cleaned_content = strip_thinking_tags(m.get("content", ""))
+            if cleaned_content:
+                cleaned_messages.append({"role": m.get("role", "user"), "content": cleaned_content[:200]})
+
         # 构建日记内容
         diary_prompt = f"""你是一个学习者。请以第一人称写一篇学习日记，回顾今天的学习经历。
 
@@ -572,7 +602,7 @@ class DialogueStateMachine:
 老师：{teacher_name}
 
 今天的课堂记录（简略）：
-{chr(10).join(f"{m['role']}: {m['content'][:100]}" for m in messages[-6:])}
+{chr(10).join(f"{m['role']}: {m['content'][:100]}" for m in cleaned_messages)}
 
 要求：
 - 第一人称
@@ -589,8 +619,10 @@ class DialogueStateMachine:
                 {"role": "system", "content": "你是日记写作助手。"},
                 {"role": "user", "content": diary_prompt},
             ])
-            title = result.get("title", f"{chapter_title}学习心得")
-            content = result.get("content", "")
+            title = strip_thinking_tags(result.get("title", ""))
+            if not title:
+                title = f"{chapter_title}学习心得"
+            content = strip_thinking_tags(result.get("content", ""))
             if content:
                 db.add_diary(self.course_id, self.session_id, title, content)
         except Exception:
@@ -601,12 +633,19 @@ class DialogueStateMachine:
         messages = db.get_messages(self.session_id)
         chapter_title = self.chapter_info.get("title", f"第{self.chapter_index + 1}章")
 
+        # 清理消息中的思考标签，兼容带思考模式的模型
+        cleaned_messages = []
+        for m in messages[-8:]:
+            cleaned_content = strip_thinking_tags(m.get("content", ""))
+            if cleaned_content:
+                cleaned_messages.append({"role": m.get("role", "user"), "content": cleaned_content[:200]})
+
         summary_prompt = f"""根据以下课堂对话，生成一份结构化Markdown复习总结。
 
 章节：{chapter_title}
 
 对话记录：
-{chr(10).join(f"**{m['role']}**: {m['content'][:200]}" for m in messages[-8:])}
+{chr(10).join(f"**{m['role']}**: {m['content'][:200]}" for m in cleaned_messages)}
 
 复习总结格式（Markdown）：
 
@@ -633,7 +672,11 @@ class DialogueStateMachine:
                 temperature=0.3,
                 max_tokens=1000,
             )
+            # 清理总结中的思考标签
+            content = strip_thinking_tags(content)
             if content:
+                db.add_summary(self.course_id, self.session_id, content)
+        except Exception:
                 db.add_summary(self.course_id, self.session_id, content)
         except Exception:
             pass

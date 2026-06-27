@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import aiofiles
@@ -23,6 +23,8 @@ from config import (
     HOST, PORT, STATIC_DIR, DATA_DIR, ROLES_META,
     DEFAULT_SLIDERS, DEPTH_CONFIG, DURATION_OPTIONS,
     ROLE_RECOMMENDATION, DEFAULT_ROLES, LLM_CONFIG, VERSION,
+    READING_MODE_CONFIG, DEFAULT_READING_MODE,
+    MODEL_TIER_CONFIG, DEFAULT_MODEL_TIER,
 )
 from database import init_db
 import database as db
@@ -107,6 +109,15 @@ async def index():
     return HTMLResponse(f"<h1>问渠 v{VERSION}</h1><p>前端页面未找到，请确保static/index.html存在。</p>")
 
 
+@app.get("/favicon.ico")
+async def favicon():
+    """返回内嵌的SVG favicon，避免404"""
+    svg = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+        <text x="50%" y="50%" font-size="48" text-anchor="middle" dominant-baseline="central">🌊</text>
+    </svg>'''
+    return Response(content=svg, media_type="image/svg+xml")
+
+
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "version": VERSION}
@@ -126,12 +137,59 @@ async def list_courses():
 @app.post("/api/courses")
 async def create_course(data: dict):
     """创建课程（支持file/url/text/recommendation）"""
-    title = data.get("title", "")
     source_type = data.get("source_type", "text")
     source_path = data.get("source_path", "")
     content_text = data.get("content_text", "")
-    course_id = db.create_course(title, source_type, source_path)
+    reading_mode = data.get("reading_mode", DEFAULT_READING_MODE)
+
+    # 如果没有传入 title，尝试从 source_path 提取书名
+    title = data.get("title", "")
+    if not title and source_path:
+        # 优先取文件名（去掉扩展名）作为书名
+        if source_type == "upload" or "/" in source_path or "\\" in source_path:
+            import os
+            filename = os.path.basename(source_path)
+            # 去掉常见扩展名
+            for ext in [".txt", ".md", ".markdown", ".epub"]:
+                if filename.lower().endswith(ext):
+                    title = filename[:-len(ext)]
+                    break
+            if not title:
+                title = filename
+        elif source_type == "url":
+            # 从 URL 中提取文件名或域名作为书名
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(source_path)
+                path = parsed.path.strip("/")
+                if path:
+                    fname = os.path.basename(path)
+                    for ext in [".txt", ".md", ".epub"]:
+                        if fname.lower().endswith(ext):
+                            title = fname[:-len(ext)]
+                            break
+                    else:
+                        title = fname
+                if not title:
+                    title = parsed.netloc or "网页内容"
+            except Exception:
+                title = "网页内容"
+        elif source_type == "text" and content_text:
+            # 从文本内容提取标题（取第一行或前50字）
+            lines = content_text.strip().split("\n")
+            first_line = lines[0].strip() if lines else ""
+            title = first_line[:50] if first_line else "文本文档"
+
+    # 确保 title 有值
+    if not title:
+        title = "未命名课程"
+
+    course_id = db.create_course(title, source_type, source_path, reading_mode)
     db.add_learning_event(course_id, "login", {"action": "create_course"})
+
+    # 阅读模式映射到认知深度
+    depth_map = {"speed": "basic", "standard": "standard", "deep": "deep"}
+    db.update_course_depth(course_id, depth_map.get(reading_mode, "standard"))
 
     # 如果是文本粘贴，直接保存内容并更新source_path
     uploaded_path = ""
@@ -230,15 +288,16 @@ async def remove_course(course_id: str):
 # ==================== 分章 ====================
 @app.post("/api/courses/{course_id}/chapters/generate")
 async def generate_chapters(course_id: str):
-    """三级回退分章（异步执行）"""
+    """TOC-First 分章（异步执行），根据阅读模式调整处理深度"""
     course = db.get_course(course_id)
     if not course:
         raise HTTPException(404, "课程不存在")
 
     source_path = course.get("source_path", "")
     source_type = course.get("source_type", "")
+    reading_mode = course.get("reading_mode", "standard")
 
-    # 提取文本（text类型映射为txt）
+    # 提取文本
     actual_type = source_type
     if source_type == "text":
         actual_type = "txt"
@@ -247,35 +306,245 @@ async def generate_chapters(course_id: str):
     if not text:
         raise HTTPException(400, "无法提取文本内容")
 
-    # 智能分章
-    chapters = await smart_chunk(text)
+    # 智能分章（传入 source_type, file_path, reading_mode 以便 TOC-First 路径）
+    chapters = await smart_chunk(text, source_type=source_type, file_path=source_path if source_type == "epub" else "", reading_mode=reading_mode)
+
+    # 速读模式：全量章节直接设为懒加载占位
+    is_speed = reading_mode == "speed"
+    max_loaded = 3 if reading_mode == "deep" else 99  # 研读只预加载前3章
 
     # 保存章节到数据库
-    for idx, (title, content) in enumerate(chapters):
-        db.add_chapter(course_id, idx, title, content[:5000])
+    for idx, chapter_item in enumerate(chapters):
+        if isinstance(chapter_item, tuple) and len(chapter_item) >= 3:
+            title, content = chapter_item[0], chapter_item[1]
+            meta = chapter_item[2] if len(chapter_item) > 2 else {}
+        elif isinstance(chapter_item, tuple):
+            title, content = chapter_item[0], chapter_item[1]
+            meta = {}
+        else:
+            title, content = str(chapter_item), ""
+            meta = {}
+
+        # 决定是否已加载
+        if is_speed:
+            is_loaded = 0
+            content_short = content[:500] if content else ""
+        else:
+            is_loaded = 1 if idx < max_loaded else 0
+            content_short = content[:5000] if content else ""
+
+        db.add_chapter(
+            course_id=course_id,
+            idx=meta.get("idx", idx),
+            title=title,
+            content_slice=content_short,
+            summary="",
+            content_full=content if is_loaded else "",
+            is_loaded=is_loaded,
+            parent_idx=meta.get("parent_idx", -1),
+            level=meta.get("level", 0),
+            sort_order=meta.get("sort_order", str(idx)),
+        )
 
     db.add_learning_event(course_id, "lesson_end", {"action": "chapters_generated", "count": len(chapters)})
 
     return {
         "total_chapters": len(chapters),
-        "chapters": [{"idx": i, "title": t} for i, (t, _) in enumerate(chapters)],
+        "chapters": [{"idx": i, "title": t[0], "is_loaded": is_speed or i < max_loaded} if isinstance(t, tuple) else {"idx": i, "title": str(t), "is_loaded": True} for i, t in enumerate(chapters)],
     }
+
+
+# ==================== 懒加载：按需加载章节内容 ====================
+@app.post("/api/courses/{course_id}/chapters/{chapter_idx}/load")
+async def load_chapter_content(course_id: str, chapter_idx: int):
+    """懒加载：仅加载指定章节的全文和掌握项"""
+    course = db.get_course(course_id)
+    if not course:
+        raise HTTPException(404, "课程不存在")
+
+    chapter = db.get_chapter(course_id, chapter_idx)
+    if not chapter:
+        raise HTTPException(404, "章节不存在")
+
+    # 已加载则直接返回
+    if chapter.get("is_loaded"):
+        return {"status": "already_loaded", "chapter": chapter}
+
+    source_path = course.get("source_path", "")
+    source_type = course.get("source_type", "")
+    reading_mode = course.get("reading_mode", "standard")
+
+    # 从 EPUB 按 href 提取正文（TOC-First 懒加载）
+    full_content = ""
+    if source_type == "epub" and source_path:
+        from chunker import extract_chapter_content_by_href
+        href = chapter.get("sort_order", "") or chapter.get("title", "")
+        # 先尝试通过 idx 从 TOC 反查 href
+        toc_items, _ = await _get_epub_toc(source_path)
+        matched_href = None
+        for item in toc_items:
+            if item["idx"] == chapter_idx:
+                matched_href = item.get("href", "")
+                break
+        if matched_href:
+            full_content = await extract_chapter_content_by_href(source_path, matched_href)
+        else:
+            # 兜底：重新提取全本
+            from chunker import extract_text_from_epub
+            full_text = await extract_text_from_epub(source_path)
+
+    # 如果是文本粘贴等非EPUB来源且已提取过全文，从原始文件重读
+    if not full_content and source_path:
+        from chunker import extract_text
+        actual = "txt" if source_type == "text" else source_type
+        full_text = await extract_text(source_path, actual)
+        # 按章节标题切出相关内容
+        full_content = _extract_chapter_from_text(full_text, chapter["title"], chapter_idx)
+
+    if not full_content:
+        full_content = chapter.get("content_slice", "") or "（内容未找到）"
+
+    # 更新数据库
+    from chunker import generate_syllabus_items
+    content_short = full_content[:5000]
+    db.update_chapter_content(course_id, chapter_idx, full_content)
+    # 同时更新 content_slice
+    conn = db.get_conn()
+    try:
+        conn.execute("UPDATE chapters SET content_slice=? WHERE course_id=? AND idx=?",
+                     (content_short, course_id, chapter_idx))
+        conn.commit()
+    finally:
+        conn.close()
+
+    # 为此章节生成掌握项（懒加载触发首次生成）
+    items = await generate_syllabus_items(course_id,
+                                          [(chapter["title"], full_content)])
+    for ch_idx, desc in items:
+        db.add_syllabus_item(course_id, ch_idx, desc)
+
+    return {
+        "status": "loaded",
+        "chapter": {
+            "idx": chapter_idx,
+            "title": chapter["title"],
+            "summary": "",
+            "content_slice": content_short,
+            "is_loaded": 1,
+        },
+        "syllabus_generated": len(items),
+    }
+
+
+async def _get_epub_toc(file_path: str) -> tuple:
+    """辅助：只获取EPUB目录结构（不提取正文）"""
+    from chunker import extract_toc_from_epub
+    return await extract_toc_from_epub(file_path)
+
+
+def _extract_chapter_from_text(full_text: str, chapter_title: str, chapter_idx: int) -> str:
+    """从完整文本中按标题切出章节内容"""
+    import re
+    # 尝试用标题定位
+    pattern = re.compile(re.escape(chapter_title), re.IGNORECASE)
+    match = pattern.search(full_text)
+    if match:
+        start = match.start()
+        # 找到下一个章节标题或末尾
+        remaining = full_text[start + len(chapter_title):]
+        # 找下一个看起来像章节标题的行
+        next_ch = re.search(r'\n#{1,4}\s+|\n第[\d一二三四五六七八九十]+[章节]|\nChapter\s+\d+', remaining)
+        end = start + len(chapter_title) + (next_ch.start() if next_ch else len(remaining))
+        return full_text[start:end].strip()
+    # 兜底：分段落取
+    paragraphs = [p.strip() for p in full_text.split('\n\n') if p.strip()]
+    chunk_size = len(paragraphs) // max(1, (chapter_idx + 1))
+    start_para = chapter_idx * chunk_size
+    end_para = start_para + chunk_size if chapter_idx < 9 else len(paragraphs)
+    return '\n\n'.join(paragraphs[start_para:end_para])
 
 
 @app.post("/api/courses/{course_id}/syllabus/generate")
 async def generate_syllabus(course_id: str):
-    """生成掌握项清单"""
+    """生成掌握项清单（根据阅读模式调整深度）"""
+    course = db.get_course(course_id)
+    if not course:
+        raise HTTPException(404, "课程不存在")
+
     chapters = db.get_chapters(course_id)
     if not chapters:
         raise HTTPException(400, "请先生成分章")
 
-    ch_list = [(ch["title"], ch.get("content_slice", "")) for ch in chapters]
+    reading_mode = course.get("reading_mode", "standard")
+
+    # 速读模式不生成掌握项
+    if reading_mode == "speed":
+        return {"total_items": 0, "message": "速读模式不生成掌握项"}
+
+    # 只为已加载的章节生成掌握项
+    ch_list = [(ch["title"], ch.get("content_slice", "")) for ch in chapters if ch.get("is_loaded", 1)]
+    if not ch_list:
+        return {"total_items": 0, "message": "无已加载章节，请先加载章节内容"}
+
     items = await generate_syllabus_items(course_id, ch_list)
 
     for chapter_index, description in items:
         db.add_syllabus_item(course_id, chapter_index, description)
 
     return {"total_items": len(items)}
+
+
+# ==================== 苏格拉底预演 ====================
+@app.get("/api/courses/{course_id}/chapters/{chapter_idx}/preview")
+async def generate_next_preview(course_id: str, chapter_idx: int):
+    """基于当前章节内容，为下一章生成苏格拉底式预演引导"""
+    course = db.get_course(course_id)
+    if not course:
+        raise HTTPException(404, "课程不存在")
+
+    next_chapter = db.get_chapter(course_id, chapter_idx + 1)
+    if not next_chapter:
+        return {"preview": "", "next_title": ""}
+
+    current_chapter = db.get_chapter(course_id, chapter_idx)
+    if not current_chapter:
+        return {"preview": "", "next_title": next_chapter.get("title", "")}
+
+    current_content = current_chapter.get("content_slice", "")
+    if not current_content:
+        return {"preview": "", "next_title": next_chapter.get("title", "")}
+
+    # 用轻量模型生成预演引导
+    prompt = f"""你是苏格拉底式学习引导者。
+
+当前章节内容摘要：
+{current_content[:1000]}
+
+下一章节标题：{next_chapter['title']}
+
+请基于当前章节讲过的内容，为下一章生成 1-2 个精巧的引导性问题。
+学生带着这些问题进入下一章，效率会更高。
+问题要具体、有穿透力，指向下一章的核心差异或深化方向。
+不要问"你觉得下一章会讲什么"这类泛泛的问题。
+
+返回 JSON：
+{{"questions": ["问题1", "问题2"]}}
+"""
+    try:
+        from llm_client import multi_llm
+        result = await multi_llm.chat_json("fast", [
+            {"role": "system", "content": "你是苏格拉底式学习引导者。返回JSON。"},
+            {"role": "user", "content": prompt},
+        ])
+        questions = result.get("questions", [])
+    except Exception:
+        questions = []
+
+    return {
+        "preview": "根据上一章的底层逻辑，下一章" + next_chapter["title"] + "极大概率会涉及相关深化内容。",
+        "next_title": next_chapter["title"],
+        "questions": questions,
+    }
 
 
 # ==================== 角色推荐 ====================
@@ -433,8 +702,8 @@ async def start_chat(course_id: str, data: dict):
     return {"session_id": session_id, "chapter_index": chapter_index}
 
 
-@app.get("/api/sessions/{session_id}")
-async def get_session_info(session_id: str):
+@app.get("/api/sessions/{session_id}/basic")
+async def get_session_basic(session_id: str):
     session = db.get_session(session_id)
     if not session:
         raise HTTPException(404, "会话不存在")
@@ -496,6 +765,31 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                 async for chunk in sm._end_session("用户主动结束"):
                     await websocket.send_json({"state": "END", "content": chunk})
                 break
+
+            # 快速跳过模式：用户点击"我已掌握"按钮
+            if msg.get("quick_mastered"):
+                sm.current_round += 1
+                sm.total_rounds += 1
+                # 保存用户消息
+                sm.messages.append({"role": "user", "content": user_text})
+                db.add_message(session_id, "user", user_text, "USER_INPUT")
+                # 标记当前章节的第一个 pending 项为 mastered
+                syllabus_items = db.get_syllabus_items(course_id)
+                chapter_pending = [s for s in syllabus_items
+                                   if s["chapter_index"] == chapter_index
+                                   and s["status"] == "pending"]
+                if chapter_pending and chapter_pending[0]["id"] not in sm.session_mastered_ids:
+                    db.update_syllabus_item(chapter_pending[0]["id"], "mastered")
+                    sm.session_mastered_ids.add(chapter_pending[0]["id"])
+                    # 通知客户端标记成功
+                    await websocket.send_json({"state": "MASTERED_SKIPPED", "syllabus_id": chapter_pending[0]["id"]})
+                # 直接进入下一个 PROBE
+                await websocket.send_json({"state": "TURN_DONE"})
+                await asyncio.sleep(0.2)
+                async for chunk in sm._probe():
+                    await websocket.send_json({"state": "PROBE", "content": chunk})
+                await websocket.send_json({"state": "PROBE_DONE"})
+                continue
 
             # 处理用户输入（EVAL → ACTION）
             full_response = ""
@@ -607,14 +901,38 @@ async def get_course_history(course_id: str):
         if ch:
             chapter_title = ch.get("title", "")
 
+        # 计算时长
+        duration_minutes = 0
+        if s.get("ended_at") and s.get("started_at"):
+            try:
+                from datetime import datetime
+                start = datetime.strptime(s["started_at"][:19], "%Y-%m-%d %H:%M:%S")
+                end = datetime.strptime(s["ended_at"][:19], "%Y-%m-%d %H:%M:%S")
+                duration_minutes = max(1, int((end - start).total_seconds() // 60))
+            except (ValueError, IndexError):
+                duration_minutes = (s.get("total_rounds") or 0) * 2
+        else:
+            duration_minutes = (s.get("total_rounds") or 0) * 2
+
+        # 转换为 UTC 时间
+        s_utc = _utc_dict(_utc_dict(s, "started_at"), "ended_at")
+
         history.append({
-            "session": _utc_dict(_utc_dict(s, "started_at"), "ended_at"),
+            "session_id": s_utc["id"],
+            "chapter_index": s_utc["chapter_index"],
+            "teacher_role_id": s_utc["teacher_role_id"],
+            "total_rounds": s_utc.get("total_rounds", 0),
+            "started_at": s_utc.get("started_at"),
+            "ended_at": s_utc.get("ended_at"),
+            "duration_minutes": duration_minutes,
             "message_count": len(messages),
             "user_message_count": len(user_msgs),
             "assistant_message_count": len(assistant_msgs),
             "diaries": _utc_list(diaries_list, "created_at"),
             "group_chats": _utc_list(group_chats, "created_at"),
             "summaries": _utc_list(summaries_list, "created_at"),
+            "has_diary": len(diaries_list) > 0,
+            "has_summary": len(summaries_list) > 0,
             "user_messages": [m["content"][:100] for m in user_msgs[-3:]],
             "chapter_title": chapter_title,
         })
@@ -682,6 +1000,19 @@ async def get_session_detail(session_id: str):
     group_chats = db.get_group_chats(session_id)
     annotations = db.get_annotations(session_id)
 
+    # 计算时长
+    duration_minutes = 0
+    if session.get("ended_at") and session.get("started_at"):
+        try:
+            from datetime import datetime
+            start = datetime.strptime(session["started_at"][:19], "%Y-%m-%d %H:%M:%S")
+            end = datetime.strptime(session["ended_at"][:19], "%Y-%m-%d %H:%M:%S")
+            duration_minutes = max(1, int((end - start).total_seconds() // 60))
+        except (ValueError, IndexError):
+            duration_minutes = (session.get("total_rounds") or 0) * 2
+    else:
+        duration_minutes = (session.get("total_rounds") or 0) * 2
+
     return {
         "session": {
             "id": session["id"],
@@ -692,6 +1023,7 @@ async def get_session_detail(session_id: str):
             "teacher_info": teacher_info,
             "course_title": course["title"] if course else "",
             "total_rounds": session["total_rounds"],
+            "total_duration": duration_minutes,
             "started_at": session["started_at"],
             "ended_at": session.get("ended_at", ""),
         },

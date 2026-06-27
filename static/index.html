@@ -121,6 +121,28 @@
                         <input type="text" id="course-title-input" placeholder="输入课程名称..." style="width:100%;padding:10px 14px;border:1px solid var(--border);border-radius:var(--radius-sm);font-size:14px">
                     </div>
 
+                    <!-- 阅读模式选择器 -->
+                    <div class="form-group" style="margin:16px 0">
+                        <label>阅读模式 <span style="font-weight:400;font-size:12px;color:#636e72">（影响处理深度和速度）</span></label>
+                        <div class="reading-mode-group" id="reading-mode-group" style="display:flex;gap:8px;margin-top:8px">
+                            <button class="option-btn mode-btn" data-mode="speed" onclick="selectReadingMode('speed')">
+                                <div style="font-size:20px">🚀</div>
+                                <div style="font-weight:600;font-size:13px">速读</div>
+                                <div style="font-size:11px;color:#636e72;margin-top:2px">快速建立知识地图</div>
+                            </button>
+                            <button class="option-btn mode-btn selected" data-mode="standard" onclick="selectReadingMode('standard')">
+                                <div style="font-size:20px">📖</div>
+                                <div style="font-weight:600;font-size:13px">细读</div>
+                                <div style="font-size:11px;color:#636e72;margin-top:2px">系统学习逐章推进</div>
+                            </button>
+                            <button class="option-btn mode-btn" data-mode="deep" onclick="selectReadingMode('deep')">
+                                <div style="font-size:20px">🔬</div>
+                                <div style="font-weight:600;font-size:13px">研读</div>
+                                <div style="font-size:11px;color:#636e72;margin-top:2px">学术研究深度追问</div>
+                            </button>
+                        </div>
+                    </div>
+
                     <!-- 文件上传 -->
                     <div id="upload-area">
                         <div class="upload-zone" id="file-drop-zone">
@@ -197,6 +219,14 @@
 
             <!-- ==================== 对话 ==================== -->
             <div class="page-panel" id="page-chat">
+                <div class="chat-header" id="chat-header">
+                    <div class="chat-header-info">
+                        <span class="chat-chapter-name" id="chat-chapter-name">加载中...</span>
+                    </div>
+                    <button class="btn btn-outline btn-sm" onclick="showChatHistory()" title="查看历史对话">
+                        📜 学习历史
+                    </button>
+                </div>
                 <div class="chat-container">
                     <div class="chat-messages" id="chat-messages">
                         <div class="empty-state" style="padding:40px">
@@ -208,6 +238,7 @@
                     <div class="chat-input-area">
                         <textarea id="chat-input" placeholder="输入你的回答..." disabled></textarea>
                         <button class="send-btn" id="send-btn" onclick="sendChatMessage()" disabled>➤</button>
+                        <button class="btn btn-success btn-sm" id="mastered-btn" onclick="sendMasteredQuick()" style="height:48px;display:none" title="标记已掌握，开始下一题">✅ 我已掌握</button>
                         <button class="btn btn-outline btn-sm" onclick="endChat()" style="height:48px">结束</button>
                     </div>
                     <div class="chat-status" id="chat-status">正在初始化...</div>
