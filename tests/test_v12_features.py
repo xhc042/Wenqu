@@ -59,14 +59,18 @@ async def test_p1_uses_key_points_when_available(monkeypatch):
 
     # 3 个 key_points → 3 个 syllabus_items
     assert len(result["syllabus_items"]) == 3
-    descriptions = [desc for _, desc in result["syllabus_items"]]
+    # v1.3: syllabus_items 格式变为 (ch_idx, desc, importance)
+    descriptions = [desc for _, desc, _ in result["syllabus_items"]]
     assert "能掌握A" in descriptions
     assert "能解释B" in descriptions
     assert "能区分A和B" in descriptions
     # importance 高的章节被分配更多（idx=0 importance=5 优先）
-    chapter_assignment = {ch_idx: 0 for ch_idx, _ in result["syllabus_items"]}
+    chapter_assignment = {ch_idx: 0 for ch_idx, _, _ in result["syllabus_items"]}
     # 至少有一个被分到 idx=0
     assert 0 in chapter_assignment.values()
+    # v1.3: 每条 syllabus_items 应有 importance 字段(1-5)
+    importances = [imp for _, _, imp in result["syllabus_items"]]
+    assert all(1 <= i <= 5 for i in importances), f"importance 越界: {importances}"
 
 
 # ==================== P3-① ====================

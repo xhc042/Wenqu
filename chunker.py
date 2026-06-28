@@ -402,9 +402,13 @@ async def extract_text_from_epub(file_path: str) -> str:
     parts = []
     if toc_items and content_map:
         for item in toc_items:
+            title = item.get("title", "")
+            # 跳过元数据章节（序言/前言/自序/附录等）
+            if is_non_core_chapter(title):
+                continue
             text = content_map.get(item["href"], "")
             if text:
-                parts.append(f"### {item['title']}\n\n{text}")
+                parts.append(f"### {title}\n\n{text}")
 
     if parts:
         return '\n\n---\n\n'.join(parts)
@@ -547,6 +551,13 @@ async def smart_chunk_from_epub(file_path: str, reading_mode: str = "standard") 
 
             # 清理标题，提升可读性
             title = _clean_chapter_title(raw_title, combined_text)
+
+            # 跳过元数据章节（序言/前言/自序/附录等）
+            if is_non_core_chapter(title):
+                combined_text = ""
+                combined_meta = None
+                combined_title_parts = []
+                return
 
             meta = combined_meta
             if reading_mode == "speed":
@@ -970,10 +981,37 @@ async def extract_chapter_snapshot(text: str, title: str) -> dict:
 
     # 从文本中提取前几个词作为关键词（兜底）
     fallback_keywords = _extract_keywords_fallback(text, title)
+    
+    # 改进的兜底内容：基于实际文本内容生成，不再是死板模板
+    # 提取首段前100字作为内容摘要
+    first_sentences = []
+    for para in text.split('\n\n')[:3]:
+        para = para.strip()
+        if para:
+            # 取前2-3个句子
+            sentences = _re.split(r'[。.!！？\n]', para)
+            for s in sentences[:3]:
+                s = s.strip()
+                if 10 <= len(s) <= 100:
+                    first_sentences.append(s)
+            if first_sentences:
+                break
+    
+    content_summary = first_sentences[0][:80] if first_sentences else ""
+    
+    # 基于实际内容生成更有价值的核心观点和学习目标
+    if content_summary:
+        improved_core_viewpoint = content_summary[:50]
+        improved_learning_goal = f"能理解{title}中关于{fallback_keywords[0] if fallback_keywords else '核心概念'}的主要内容"
+    else:
+        # 最后的兜底：尽量给出有意义的描述
+        improved_core_viewpoint = f"探讨{title}相关主题"
+        improved_learning_goal = f"能概述{title}的主要内容和观点"
+    
     return {
         "keywords": fallback_keywords,
-        "core_viewpoint": f"本章讲解「{title}」相关内容",
-        "learning_goal": f"了解「{title}」的基本内容",
+        "core_viewpoint": improved_core_viewpoint,
+        "learning_goal": improved_learning_goal,
         "importance": 3,
         "difficulty": "中等",
         "_fallback": True,  # 标记为兜底数据
@@ -1076,13 +1114,29 @@ async def generate_global_highlights(course_id: str, snapshots: list, chapter_ti
     else:
         meta_warning = ""
 
+    # v1.3 P0-②: prompt 强化"本书独有"原则,避免生成放之四海皆准的泛化模板
     prompt = f"""基于以下全书章节快照，请完成5个任务：
 
 {snapshot_text}
 {meta_warning}
-任务1：提炼5-10个最重要的跨章核心知识点（**用"能+具体动作"描述，每个不超过20字**）
-   - ✅ 好例子："能列出ETF的5种投资策略"、"能解释ETF运作机制"、"能区分主动型与被动型ETF"
-   - ❌ 坏例子："能理解ETF"、"能掌握ETF知识"、"能了解XXX"
+任务1：提炼5-10个最重要的核心知识点（v1.3 强化版：必须锚定本书独有内容）
+
+要求：每条 key_point 必须满足"本书独有"原则——
+1. 必须引用快照中的具体关键词、具体观点、具体方法
+2. 必须让读者能区分"这本书"与"其他讲类似主题的书"
+3. 离开这本书的具体内容，这条知识就不成立
+4. 格式：[具体知识/方法/观点] + 为什么本书这样主张（即哪个章节/哪个快照支撑）
+
+✅ 好例子（锚定本书具体内容）：
+- "浮存金策略的复利效应：通过 GEICO 保险的浮存金，巴菲特构建了低成本资金池的复利模型（第8章支撑）"
+- "能力圈的'内部记分卡'：用自己定义的衡量标准对抗市场先生的情绪波动（第11章支撑）"
+
+❌ 坏例子（泛化、放哪本书都能用，禁止）：
+- "能理解价值投资核心理念"
+- "能掌握长期投资策略"
+- "能区分投资与投机的差异"
+- "本章讲解XXX"
+
 任务2：推荐优先学习的章节顺序（**只能推荐正文章节，不能是序言/前言/自序/附录**）
 任务3：标注章节间的关键依赖关系（哪些正文章节必须先学）
 任务4：识别全书最核心的4-6个正文章节（占全书价值80%），**绝对不能包含序言/前言/自序/附录等元数据章节**
@@ -1090,7 +1144,7 @@ async def generate_global_highlights(course_id: str, snapshots: list, chapter_ti
 
 返回严格JSON（不要任何其他文字）：
 {{
-  "key_points": ["能+具体动作", "能+具体动作", ...],
+  "key_points": ["锚定本书的具体知识1", "锚定本书的具体知识2", ...],
   "chapter_priorities": ["第5章", "第8章", ...],
   "chapter_dependencies": {{"第8章": "第5章"}},
   "core_chapter_indices": ["第5章", "第8章", "第11章", "第14章"],
@@ -1221,22 +1275,44 @@ def _infer_core_chapters(snapshots: list, chapter_titles: list = None, top_n: in
 def _build_highlights_fallback(snapshots: list, chapter_titles: list) -> dict:
     """
     兜底：LLM完全失败时，基于快照数据手动构建精华
+    改进：生成更有参考价值的内容，不再用死板模板
     """
     # 收集所有非空关键词（排除元数据章节）
     all_keywords = []
+    core_viewpoints = []
     for i, s in enumerate(snapshots):
         if i < len(chapter_titles) and is_non_core_chapter(chapter_titles[i]):
             continue
         for kw in s.get("keywords", []):
             if kw and kw not in all_keywords:
                 all_keywords.append(kw)
+        # 收集有实际内容的核心观点
+        cv = s.get("core_viewpoint", "")
+        if cv and not cv.startswith("本章讲解") and not cv.startswith("了解") and len(cv) > 10:
+            core_viewpoints.append(cv)
 
     # 基于 importance 排序找核心章节（自动过滤元数据）
     core_indices = _infer_core_chapters(snapshots, chapter_titles, top_n=5)
     all_priorities = [f"第{i+1}章" for i in range(len(snapshots))]
 
+    # 生成更有价值的核心知识点
+    key_points = []
+    if all_keywords:
+        # 用关键词生成更具体的知识点描述
+        for kw in all_keywords[:6]:
+            key_points.append(f"能描述{kw}的核心要点和应用场景")
+    
+    # 如果有好的核心观点，也加入知识点
+    for vp in core_viewpoints[:3]:
+        if len(vp) > 10 and vp not in key_points:
+            key_points.append(f"能理解{vp[:30]}")
+
+    # 如果没有有价值的知识点，给一个通用的但有指导性的
+    if not key_points:
+        key_points = ["能掌握本书核心概念并应用到实际场景中"]
+
     return {
-        "key_points": [f"能描述{kw}的核心要点" for kw in all_keywords[:8]] if all_keywords else [],
+        "key_points": key_points[:10],
         "chapter_priorities": all_priorities,
         "chapter_dependencies": {},
         "core_chapter_indices": core_indices,

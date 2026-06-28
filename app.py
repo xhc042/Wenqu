@@ -51,7 +51,9 @@ TASK_STATUS = {
 async_tasks: dict[str, dict] = {}
 
 def _utc(dt):
-    return (dt + 'Z') if dt else dt
+    if not dt or not isinstance(dt, str) or not dt.strip():
+        return dt
+    return (dt + 'Z') if not dt.endswith('Z') else dt
 
 def _utc_dict(d, field):
     if not d:
@@ -63,6 +65,23 @@ def _utc_dict(d, field):
 
 def _utc_list(items, field):
     return [_utc_dict(item, field) for item in items] if items else []
+
+
+def _get_course_group_chats(course_id: str) -> list:
+    """获取课程所有群聊记录（按课程ID查询）"""
+    conn = db.get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT gc.*, s.chapter_index, s.created_at as session_created_at "
+            "FROM group_chats gc "
+            "LEFT JOIN sessions s ON gc.session_id = s.id "
+            "WHERE gc.course_id=? "
+            "ORDER BY gc.created_at DESC LIMIT 20",
+            (course_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 async def _run_speed_mode_postprocess(
@@ -189,7 +208,10 @@ async def _run_speed_mode_postprocess(
     #   1. `key_points` 已经是"全书 5-10 个核心知识点"，再调一次 LLM 冗余
     #   2. generate_speed_read_syllabus 有 `chapter_info[:20]` 截断，长书后 N 章不进 prompt
     #   3. key_points 路径节省 1 次 LLM 调用 + token 消耗
-    syllabus_items: List[Tuple[int, str]] = []
+    # v1.3 P0-③: 写入 importance 字段（来自 key_points 排序，1-5）
+    #   - key_points 越靠前越核心 → importance 越高
+    #   - 5-10 个 key_points 映射到 3-5 重要度（前 3 条 = 5，最后几条 = 3）
+    syllabus_items: List[Tuple[int, str, int]] = []
     key_points = highlights.get("key_points", []) if isinstance(highlights, dict) else []
 
     if key_points:
@@ -199,20 +221,33 @@ async def _run_speed_mode_postprocess(
             key=lambda kv: kv[1].get("importance", 3),
             reverse=True,
         )
+        # 计算 importance 梯度：kps 总数 N,前 ceil(N*0.3) 条 = 5,中间 = 4,后 = 3
+        kp_count = min(len(key_points), 15)
+        def _calc_importance(pos: int, total: int) -> int:
+            """前 30% → 5,中间 40% → 4,后 30% → 3"""
+            if total <= 0:
+                return 3
+            if pos < max(1, total * 0.3):
+                return 5
+            if pos < total * 0.7:
+                return 4
+            return 3
+
         # round-robin 分配：每个 key_point 分配到当前 importance 最高的章节
-        for i, kp in enumerate(key_points[:15]):
+        for i, kp in enumerate(key_points[:kp_count]):
             if sorted_snaps:
                 target_ch_idx = sorted_snaps[i % len(sorted_snaps)][0]
             else:
                 target_ch_idx = 0
-            syllabus_items.append((target_ch_idx, kp))
+            importance = _calc_importance(i, kp_count)
+            syllabus_items.append((target_ch_idx, kp, importance))
 
     # --- Step 5: fallback（P1-④）---
     if not syllabus_items and snapshots:
         for ch_idx, snap in snapshot_by_idx.items():
             goal = (snap.get("learning_goal", "") or "").strip()
             if goal:
-                syllabus_items.append((ch_idx, goal))
+                syllabus_items.append((ch_idx, goal, 3))
             if len(syllabus_items) >= 10:
                 break
 
@@ -228,6 +263,9 @@ async def _persist_speed_results(course_id: str, result: dict) -> None:
     """
     把 speed 模式后处理结果写入数据库（独立函数便于测试）
     修复 P0-①：抽离 DB 写入逻辑
+    修复 P1-②：使用事务包装，确保数据一致性
+    
+    如果中途失败，整个事务回滚，不会写入部分数据
     """
     import json
     import logging
@@ -235,50 +273,134 @@ async def _persist_speed_results(course_id: str, result: dict) -> None:
 
     snapshots_by_idx = result.get("snapshots_by_idx", {})
 
-    # 1. 写 chapter_snapshots
-    for ch_idx, snapshot in snapshots_by_idx.items():
+    # 使用数据库事务确保原子性
+    conn = db.get_conn()
+    try:
+        # 启用外键约束和事务
+        conn.execute("BEGIN TRANSACTION")
+        
         try:
-            db.add_chapter_snapshot(
-                course_id, ch_idx,
-                json.dumps(snapshot.get("keywords", []), ensure_ascii=False),
-                snapshot.get("core_viewpoint", ""),
-                global_priority=snapshot.get("importance", 0),
-                learning_goal=snapshot.get("learning_goal", ""),
-                importance=snapshot.get("importance", 0),
-                difficulty=snapshot.get("difficulty", ""),
-            )
-        except Exception as e:
-            logger.warning(f"[speed] 写 chapter_snapshot 失败 [{ch_idx}]: {e}")
+            # 1. 写 chapter_snapshots
+            for ch_idx, snapshot in snapshots_by_idx.items():
+                try:
+                    conn.execute(
+                        """INSERT OR REPLACE INTO chapter_snapshots 
+                           (course_id, chapter_index, keywords, core_viewpoint, global_priority, learning_goal, importance, difficulty)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            course_id, ch_idx,
+                            json.dumps(snapshot.get("keywords", []), ensure_ascii=False),
+                            snapshot.get("core_viewpoint", ""),
+                            snapshot.get("importance", 0),
+                            snapshot.get("learning_goal", ""),
+                            snapshot.get("importance", 0),
+                            snapshot.get("difficulty", ""),
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(f"[speed] 写 chapter_snapshot 失败 [{ch_idx}]: {e}")
 
-    # 2. 写 global_highlights
-    highlights = result.get("highlights", {}) or {}
-    if highlights:
-        try:
-            db.add_global_highlights(
-                course_id,
-                json.dumps(highlights.get("key_points", []), ensure_ascii=False),
-                json.dumps(highlights.get("chapter_priorities", []), ensure_ascii=False),
-                highlights.get("relationships", ""),
-                json.dumps(highlights.get("core_chapter_indices", []), ensure_ascii=False),
-                json.dumps(highlights.get("chapter_dependencies", {}), ensure_ascii=False),
-            )
-        except Exception as e:
-            logger.warning(f"[speed] 写 global_highlights 失败: {e}")
+            # 2. 写 global_highlights
+            highlights = result.get("highlights", {}) or {}
+            if highlights:
+                try:
+                    conn.execute(
+                        """INSERT OR REPLACE INTO global_highlights 
+                           (course_id, key_points, chapter_priorities, relationships, core_chapter_indices, chapter_dependencies)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (
+                            course_id,
+                            json.dumps(highlights.get("key_points", []), ensure_ascii=False),
+                            json.dumps(highlights.get("chapter_priorities", []), ensure_ascii=False),
+                            highlights.get("relationships", ""),
+                            json.dumps(highlights.get("core_chapter_indices", []), ensure_ascii=False),
+                            json.dumps(highlights.get("chapter_dependencies", {}), ensure_ascii=False),
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(f"[speed] 写 global_highlights 失败: {e}")
 
-    # 3. 删旧 syllabus_items + 写新的
-    syllabus_items = result.get("syllabus_items", [])
-    if syllabus_items:
-        try:
-            _conn = db.get_conn()
-            try:
-                _conn.execute("DELETE FROM syllabus_items WHERE course_id=?", (course_id,))
-                _conn.commit()
-            finally:
-                _conn.close()
-            for ch_idx, desc in syllabus_items:
-                db.add_syllabus_item(course_id, ch_idx, desc)
+            # 3. 删旧 syllabus_items + 写新的
+            # v1.3 P0-③: 写入 importance 字段（来自 key_points 排序）
+            syllabus_items = result.get("syllabus_items", [])
+            if syllabus_items:
+                try:
+                    conn.execute("DELETE FROM syllabus_items WHERE course_id=?", (course_id,))
+                    for item in syllabus_items:
+                        # 兼容老格式 (ch_idx, desc) 和新格式 (ch_idx, desc, importance)
+                        if len(item) == 3:
+                            ch_idx, desc, importance = item
+                        else:
+                            ch_idx, desc = item[0], item[1]
+                            importance = 3
+                        conn.execute(
+                            "INSERT INTO syllabus_items (course_id, chapter_index, description, importance) VALUES (?, ?, ?, ?)",
+                            (course_id, ch_idx, desc, importance)
+                        )
+                except Exception as e:
+                    logger.warning(f"[speed] 写 syllabus_items 失败: {e}")
+
+            # 所有操作成功，提交事务
+            conn.commit()
         except Exception as e:
-            logger.warning(f"[speed] 写 syllabus_items 失败: {e}")
+            # 任何错误都回滚
+            conn.rollback()
+            logger.error(f"[speed] 事务失败，已回滚: {e}")
+            raise
+        
+    finally:
+        conn.close()
+
+
+def _save_chapters_to_db(course_id: str, chapters: list, reading_mode: str) -> list:
+    """
+    保存章节到数据库（统一入口，消除重复逻辑）
+    
+    修复 P2：从 run_chapter_generation 和 generate_chapters 中抽离
+    
+    Returns:
+        chapter_titles: 章节标题列表
+    """
+    is_speed = reading_mode == "speed"
+    max_loaded = 3 if reading_mode == "deep" else 99
+    
+    chapter_titles = []
+    for idx, chapter_item in enumerate(chapters):
+        if isinstance(chapter_item, tuple) and len(chapter_item) >= 3:
+            title, content = chapter_item[0], chapter_item[1]
+            meta = chapter_item[2] if len(chapter_item) > 2 else {}
+        elif isinstance(chapter_item, tuple):
+            title, content = chapter_item[0], chapter_item[1]
+            meta = {}
+        else:
+            title, content = str(chapter_item), ""
+            meta = {}
+        
+        chapter_titles.append(title)
+        
+        if is_speed:
+            is_loaded = 0
+            # speed 模式下，chapters 列表里 content 已经过 _sample_first_last(≤600字) 采样
+            # 此处保留 500 字截断以确保 DB content_slice ≤ 600 字（验收标准）
+            content_short = content[:500] if content else ""
+        else:
+            is_loaded = 1 if idx < max_loaded else 0
+            content_short = content[:5000] if content else ""
+        
+        db.add_chapter(
+            course_id=course_id,
+            idx=meta.get("idx", idx),
+            title=title,
+            content_slice=content_short,
+            summary="",
+            content_full=content if is_loaded else "",
+            is_loaded=is_loaded,
+            parent_idx=meta.get("parent_idx", -1),
+            level=meta.get("level", 0),
+            sort_order=meta.get("sort_order", str(idx)),
+        )
+    
+    return chapter_titles
 
 
 def _add_default_syllabus_items(course_id: str, chapters: list):
@@ -423,6 +545,7 @@ async def run_chapter_generation(task_id: str):
         source_path = course.get("source_path", "")
         source_type = course.get("source_type", "")
         reading_mode = course.get("reading_mode", "standard")
+        is_speed = reading_mode == "speed"
         
         # 步骤1: 智能分章
         task["steps"][0]["detail"] = "正在分析文本结构..."
@@ -440,46 +563,8 @@ async def run_chapter_generation(task_id: str):
         task["steps"][0]["detail"] = f"分章完成，共{len(chapters)}章"
         task["progress"] = 30
         
-        # 保存章节到数据库（复用原有逻辑）
-        is_speed = reading_mode == "speed"
-        max_loaded = 3 if reading_mode == "deep" else 99
-        
-        chapter_titles = []
-        for idx, chapter_item in enumerate(chapters):
-            if isinstance(chapter_item, tuple) and len(chapter_item) >= 3:
-                title, content = chapter_item[0], chapter_item[1]
-                meta = chapter_item[2] if len(chapter_item) > 2 else {}
-            elif isinstance(chapter_item, tuple):
-                title, content = chapter_item[0], chapter_item[1]
-                meta = {}
-            else:
-                title, content = str(chapter_item), ""
-                meta = {}
-            
-            chapter_titles.append(title)
-            
-            if is_speed:
-                is_loaded = 0
-                # speed 模式下，chapters 列表里 content 已经过 _sample_first_last(≤600字) 采样
-                # 此处保留 500 字截断以确保 DB content_slice ≤ 600 字（验收标准）
-                # v1.2 可考虑改为 content_short = content（完全保留采样结果）
-                content_short = content[:500] if content else ""
-            else:
-                is_loaded = 1 if idx < max_loaded else 0
-                content_short = content[:5000] if content else ""
-            
-            db.add_chapter(
-                course_id=course_id,
-                idx=meta.get("idx", idx),
-                title=title,
-                content_slice=content_short,
-                summary="",
-                content_full=content if is_loaded else "",
-                is_loaded=is_loaded,
-                parent_idx=meta.get("parent_idx", -1),
-                level=meta.get("level", 0),
-                sort_order=meta.get("sort_order", str(idx)),
-            )
+        # 保存章节到数据库（使用统一函数）
+        chapter_titles = _save_chapters_to_db(course_id, chapters, reading_mode)
         
         db.add_learning_event(course_id, "lesson_end", {"action": "chapters_generated", "count": len(chapters)})
         
@@ -833,11 +918,13 @@ async def generate_chapters(course_id: str):
     # 智能分章（传入 source_type, file_path, reading_mode 以便 TOC-First 路径）
     chapters = await smart_chunk(text, source_type=source_type, file_path=source_path if source_type == "epub" else "", reading_mode=reading_mode)
 
-    # 速读模式：全量章节直接设为懒加载占位
-    is_speed = reading_mode == "speed"
-    max_loaded = 3 if reading_mode == "deep" else 99  # 研读只预加载前3章
+    # 保存章节到数据库（使用统一函数）
+    chapter_titles = _save_chapters_to_db(course_id, chapters, reading_mode)
 
-    # 获取快照映射（用于章节列表展示）
+    db.add_learning_event(course_id, "lesson_end", {"action": "chapters_generated", "count": len(chapters)})
+
+    # 获取章节索引映射（用于速读模式）
+    is_speed = reading_mode == "speed"
     snapshot_map = {}
     core_indices = set()
     if is_speed:
@@ -856,47 +943,6 @@ async def generate_chapters(course_id: str):
                         core_indices.add(int(m.group(1)) - 1)
         except Exception:
             pass
-
-    # 保存章节到数据库
-    chapter_titles = []
-    for idx, chapter_item in enumerate(chapters):
-        if isinstance(chapter_item, tuple) and len(chapter_item) >= 3:
-            title, content = chapter_item[0], chapter_item[1]
-            meta = chapter_item[2] if len(chapter_item) > 2 else {}
-        elif isinstance(chapter_item, tuple):
-            title, content = chapter_item[0], chapter_item[1]
-            meta = {}
-        else:
-            title, content = str(chapter_item), ""
-            meta = {}
-
-        chapter_titles.append(title)
-
-        # 决定是否已加载
-        if is_speed:
-            is_loaded = 0
-            # speed 模式下，chapters 列表里 content 已经过 _sample_first_last(≤600字) 采样
-            # 此处保留 500 字截断以确保 DB content_slice ≤ 600 字（验收标准）
-            # v1.2 可考虑改为 content_short = content（完全保留采样结果）
-            content_short = content[:500] if content else ""
-        else:
-            is_loaded = 1 if idx < max_loaded else 0
-            content_short = content[:5000] if content else ""
-
-        db.add_chapter(
-            course_id=course_id,
-            idx=meta.get("idx", idx),
-            title=title,
-            content_slice=content_short,
-            summary="",
-            content_full=content if is_loaded else "",
-            is_loaded=is_loaded,
-            parent_idx=meta.get("parent_idx", -1),
-            level=meta.get("level", 0),
-            sort_order=meta.get("sort_order", str(idx)),
-        )
-
-    db.add_learning_event(course_id, "lesson_end", {"action": "chapters_generated", "count": len(chapters)})
 
     # 速读模式：额外生成知识快照和全局精华（P0-①：抽离为独立函数）
     if is_speed:
@@ -926,6 +972,7 @@ async def generate_chapters(course_id: str):
             logging.info(
                 f"[速读模式] 完成，快照 {len(snapshots)} 章，掌握项 {len(result['syllabus_items'])} 条"
             )
+            # 统一返回结构：成功和失败使用相同的章节格式
             return {
                 "total_chapters": len(chapters),
                 "snapshots_generated": len(snapshots),
@@ -934,8 +981,8 @@ async def generate_chapters(course_id: str):
                 "core_chapter_indices": list(core_indices),
                 "chapters": [
                     {
-                        "idx": c[2].get("idx", i) if isinstance(c, tuple) and len(c) >= 3 else i,
-                        "title": c[0] if isinstance(c, tuple) else str(c),
+                        "idx": i,
+                        "title": chapters[i][0] if isinstance(chapters[i], tuple) else str(chapters[i]),
                         "is_loaded": False,
                         "importance": snapshot_map.get(i, {}).get("importance", 0),
                         "keywords": snapshot_map.get(i, {}).get("keywords", []),
@@ -943,25 +990,34 @@ async def generate_chapters(course_id: str):
                         "learning_goal": snapshot_map.get(i, {}).get("learning_goal", ""),
                         "is_core": i in core_indices,
                     }
-                    for i, c in enumerate(chapters)
+                    for i in range(len(chapters))
                 ],
             }
         except Exception as e:
-            # 快照生成失败不影响主流程
+            # 快照生成失败不影响主流程，使用相同结构返回
             import logging
             logging.warning(f"速读模式快照生成失败: {e}")
             import traceback
             logging.warning(traceback.format_exc())
+            # 失败时也返回统一结构的章节列表
             return {
                 "total_chapters": len(chapters),
                 "snapshots_generated": 0,
                 "highlights_generated": False,
                 "reading_mode": "speed",
+                "core_chapter_indices": [],
                 "chapters": [
-                    {"idx": c[2].get("idx", i), "title": c[0], "is_loaded": False}
-                    if isinstance(c, tuple) and len(c) >= 3 else
-                    {"idx": i, "title": c[0] if isinstance(c, tuple) else str(c), "is_loaded": False}
-                    for i, c in enumerate(chapters)
+                    {
+                        "idx": i,
+                        "title": chapters[i][0] if isinstance(chapters[i], tuple) else str(chapters[i]),
+                        "is_loaded": False,
+                        "importance": 0,
+                        "keywords": [],
+                        "core_viewpoint": "",
+                        "learning_goal": "",
+                        "is_core": False,
+                    }
+                    for i in range(len(chapters))
                 ],
             }
 
@@ -1784,8 +1840,10 @@ async def start_defense(course_id: str):
         selected = syllabus
     else:
         first = [s for s in syllabus if s["chapter_index"] == 0]
-        middle = [s for s in syllabus if s["chapter_index"] == (course["total_chapters"] // 2) if s not in first]
-        last = [s for s in syllabus if s["chapter_index"] == course["total_chapters"] - 1 if s not in first]
+        middle_candidates = [s for s in syllabus if s["chapter_index"] == (course["total_chapters"] // 2)]
+        last_candidates = [s for s in syllabus if s["chapter_index"] == course["total_chapters"] - 1]
+        middle = [s for s in middle_candidates if s not in first]
+        last = [s for s in last_candidates if s not in first]
 
         selected = []
         if first:
@@ -2358,6 +2416,10 @@ async def get_course_overview(course_id: str):
             "weak_areas": weak_areas,
             "recommendation": recommendation,
             "highlights": highlights,
+            # 新增：日记、群聊、学习记录
+            "diaries": _utc_list(db.get_diaries(course_id), "created_at")[:10],
+            "summaries": _utc_list(db.get_summaries(course_id), "created_at")[:10],
+            "group_chats": _get_course_group_chats(course_id),
         }
     else:
         # 细读/研读模式：使用掌握项统计
@@ -2424,6 +2486,10 @@ async def get_course_overview(course_id: str):
             "weak_areas": weak_areas,
             "recommendation": recommendation,
             "next_chapter": next_chapter,
+            # 新增：日记、群聊、学习记录
+            "diaries": _utc_list(db.get_diaries(course_id), "created_at")[:10],
+            "summaries": _utc_list(db.get_summaries(course_id), "created_at")[:10],
+            "group_chats": _get_course_group_chats(course_id),
         }
 
 
@@ -2517,7 +2583,7 @@ async def get_spiritual_notes(course_id: str):
 @app.post("/api/courses/{course_id}/spiritual-notes/generate")
 async def generate_spiritual_notes(course_id: str):
     """为指定会话生成思辨笔记"""
-    data = await request.json()
+    data = request.json()
     session_id = data.get("session_id")
     if not session_id:
         raise HTTPException(400, "缺少 session_id")

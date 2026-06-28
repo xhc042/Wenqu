@@ -237,7 +237,14 @@ class DialogueStateMachine:
 
         # 获取本章未掌握的项，用于注入提示
         mastery_hint = self._get_mastery_hint()
+        # v1.3 P0-⑥: SHARE 阶段强化 — 必须先揭示核心观点,不从基础定义开始
         share_prompt = f"""请用自己的话复述这段教材的核心观点。
+
+要求：
+1. 必须先揭示本章最核心的观点（[重要度4-5] 的项），不要从基础概念定义开始
+2. 用具体例子/案例/数据支撑核心观点
+3. 让用户听完就知道"这一章最值得记住的是什么"
+
 {mastery_hint}
 以'书上有个很有趣的观点...'或'这段让我联想到...'开头。"""
 
@@ -292,23 +299,49 @@ class DialogueStateMachine:
         self.state = self.WAIT_USER
 
     def _get_mastery_hint(self) -> str:
-        """获取掌握项提示（用于SHARE阶段）"""
-        chapter_pending = [s for s in self.syllabus_items
-                          if s["chapter_index"] == self.chapter_index
-                          and s["status"] == "pending"]
+        """获取掌握项提示（用于SHARE阶段）
+
+        v1.3 P0-④: 按 importance desc 排序,优先揭示本章最重要的核心知识,
+        并在文本中标注 [重要度N/5],让 LLM 优先讲核心
+        """
+        chapter_pending = sorted(
+            [s for s in self.syllabus_items
+             if s["chapter_index"] == self.chapter_index
+             and s["status"] == "pending"],
+            key=lambda x: x.get("importance", 0),
+            reverse=True,
+        )
         if chapter_pending:
-            hint_items = [f"- {item['description']}" for item in chapter_pending[:3]]
-            return f"特别注意以下需要掌握的能力点：\n{chr(10).join(hint_items)}\n"
+            hint_items = [
+                f"- [重要度{item.get('importance', 0)}/5] {item['description']}"
+                for item in chapter_pending[:3]
+            ]
+            return f"本章最重要的能力点（按重要度排序）：\n{chr(10).join(hint_items)}\n"
         return ""
 
     def _get_mastery_check(self) -> str:
-        """获取掌握项检查清单（用于PROBE阶段）"""
-        chapter_items = [s for s in self.syllabus_items
-                        if s["chapter_index"] == self.chapter_index]
+        """获取掌握项检查清单（用于PROBE阶段）
+
+        v1.3 P0-④: 按 importance desc 排序,PROBE 优先问核心,
+        并显式禁止停留在基础概念定义
+        """
+        chapter_items = sorted(
+            [s for s in self.syllabus_items if s["chapter_index"] == self.chapter_index],
+            key=lambda x: x.get("importance", 0),
+            reverse=True,
+        )
         if chapter_items:
-            pending_items = [f"- {s['description']}" for s in chapter_items if s["status"] == "pending"]
+            pending_items = [
+                f"- [重要度{s.get('importance', 0)}/5] {s['description']}"
+                for s in chapter_items if s["status"] == "pending"
+            ]
             if pending_items:
-                return f"请优先围绕以下知识点提问：\n{chr(10).join(pending_items[:3])}"
+                return f"""请严格按重要度提问（v1.3 增强）：
+1. 必须先围绕高重要度的知识点（[重要度4-5]）提问
+2. 不要停留在基础概念定义（如"什么是X"）
+3. 优先问"应用/对比/判断"类问题（如"如果...会怎样"、"X和Y的区别"、"你会怎么做"）
+
+{chr(10).join(pending_items[:3])}"""
         return ""
 
     def _check_knowledge_coverage(self) -> dict:

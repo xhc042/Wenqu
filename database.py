@@ -65,6 +65,7 @@ def init_db():
             chapter_index INTEGER NOT NULL,
             description TEXT NOT NULL,
             status TEXT DEFAULT 'pending',  -- pending | in_progress | mastered
+            importance INTEGER DEFAULT 3,  -- v1.3: 1-5,5=最核心,speed 模式按此排序优先学
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (course_id) REFERENCES courses(id)
         );
@@ -323,6 +324,12 @@ def _migrate_schema():
             if col not in cols4:
                 conn.execute(f"ALTER TABLE global_highlights ADD COLUMN {col} {col_def}")
 
+        # 检查 syllabus_items 表（v1.3: speed 模式按 importance 优先学核心知识）
+        cols5 = {row["name"] for row in conn.execute("PRAGMA table_info(syllabus_items)")}
+        if "importance" not in cols5:
+            # 旧数据默认 3（中等重要），新数据由 chunker 按 key_points 排序写入 1-5
+            conn.execute("ALTER TABLE syllabus_items ADD COLUMN importance INTEGER DEFAULT 3")
+
         conn.commit()
     finally:
         conn.close()
@@ -516,12 +523,18 @@ def get_chapter(course_id: str, chapter_index: int) -> Optional[dict]:
 
 # ==================== 掌握项 ====================
 
-def add_syllabus_item(course_id: str, chapter_index: int, description: str) -> int:
+def add_syllabus_item(course_id: str, chapter_index: int, description: str, importance: int = 3) -> int:
+    """
+    v1.3: 新增 importance 参数(1-5,5=最核心)
+    - 标准模式调用方不传 → 默认 3(向后兼容)
+    - speed 模式调用方按 key_points 排序写入 → 影响对话优先级
+    """
+    assert 1 <= importance <= 5, f"importance must be 1-5, got {importance}"
     conn = get_conn()
     try:
         cur = conn.execute(
-            "INSERT INTO syllabus_items (course_id, chapter_index, description) VALUES (?, ?, ?)",
-            (course_id, chapter_index, description),
+            "INSERT INTO syllabus_items (course_id, chapter_index, description, importance) VALUES (?, ?, ?, ?)",
+            (course_id, chapter_index, description, importance),
         )
         conn.commit()
         return cur.lastrowid
@@ -530,10 +543,14 @@ def add_syllabus_item(course_id: str, chapter_index: int, description: str) -> i
 
 
 def get_syllabus_items(course_id: str) -> list:
+    """v1.3: 默认按 importance desc 排序,确保核心知识排在前面"""
     conn = get_conn()
     try:
         rows = conn.execute(
-            "SELECT * FROM syllabus_items WHERE course_id=? ORDER BY chapter_index, id", (course_id,)
+            """SELECT * FROM syllabus_items
+               WHERE course_id=?
+               ORDER BY chapter_index, importance DESC, id""",
+            (course_id,),
         ).fetchall()
         return [dict(r) for r in rows]
     finally:
