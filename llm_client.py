@@ -120,6 +120,8 @@ class LLMClient:
         - 失败：响应为空 / ⚠️ 前缀 / 解析错误时，返回 {"status": "thinking", "items": []}
         注意：不使用 response_format 参数（DeepSeek 对 json_object 模式支持不稳定），
         改为在 system prompt 中要求严格返回纯 JSON。
+        
+        v1.20 修复：增加 thinking 标签清理，兼容带思考模式的模型
         """
         text = await self.chat(
             messages=messages,
@@ -127,6 +129,16 @@ class LLMClient:
         )
         if not text or text.startswith("⚠️"):
             return {"status": "thinking", "items": []}
+        
+        # v1.20: 清理思考标签（兼容 o1/Claude 等模型的思考模式）
+        import re as _re
+        text = _re.sub(r'<think>[\s\S]*?</think>', '', text, flags=_re.IGNORECASE)
+        text = _re.sub(r'<thinking>[\s\S]*?</thinking>', '', text, flags=_re.IGNORECASE)
+        text = text.strip()
+        
+        if not text:
+            return {"status": "thinking", "items": []}
+        
         try:
             result = json.loads(text)
             # 防御：LLM 有时会返回纯数组而非 JSON 对象
@@ -134,6 +146,19 @@ class LLMClient:
                 return {"status": "thinking", "items": result}
             return result
         except json.JSONDecodeError:
+            # v1.20: 尝试从混合文本中提取JSON（LLM可能在JSON前后加了注释）
+            # 寻找第一个 { 和最后一个 }
+            start = text.find('{')
+            end = text.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                json_str = text[start:end+1]
+                try:
+                    result = json.loads(json_str)
+                    if isinstance(result, list):
+                        return {"status": "thinking", "items": result}
+                    return result
+                except json.JSONDecodeError:
+                    pass
             return {"status": "thinking", "items": []}
 
     async def generate_title(self, content: str) -> str:

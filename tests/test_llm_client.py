@@ -80,13 +80,14 @@ async def test_chat_json_warning_prefix_returns_empty_items(client):
 @pytest.mark.asyncio
 async def test_chat_json_malformed_json_returns_empty_items(client):
     """
-    场景：LLM 返回无法解析的文本（如纯 Markdown 包裹的 JSON）
+    场景：LLM 返回完全无法解析的文本（无JSON结构）
     期望：json.JSONDecodeError 被捕获，返回空结构
     """
     messages = [{"role": "user", "content": "描述"}]
 
     with patch.object(client, "chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.return_value = "以下是JSON：```json\n{\"key\": \"value\"}\n```"
+        # 使用完全不包含JSON结构的文本
+        mock_chat.return_value = "这是一段纯文本，没有任何JSON结构"
 
         result = await client.chat_json(messages)
 

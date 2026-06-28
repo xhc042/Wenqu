@@ -935,6 +935,7 @@ async def extract_chapter_snapshot(text: str, title: str) -> dict:
 {{"keywords": ["关键词1", "关键词2"], "core_viewpoint": "一句话观点", "learning_goal": "能+具体动作", "importance": 3, "difficulty": "中等"}}"""
 
     # 重试机制：最多3次，每次失败后等 2 秒再试（给 API 恢复时间）
+    # v1.20 优化：增加增量退避（2s, 4s, 8s），降低并发冲突概率
     last_error = None
     for attempt in range(3):
         try:
@@ -943,8 +944,12 @@ async def extract_chapter_snapshot(text: str, title: str) -> dict:
                 {"role": "user", "content": prompt},
             ], temperature=0.3)
 
-            # 字段解析与验证
             # 防御：chat_json 可能返回 {"status": "thinking", "items": [...]}（LLM返回数组）
+            # v1.20: 检查 status 字段，如果是 thinking 且 items 为空，说明调用失败
+            if result.get("status") == "thinking" and not result.get("items"):
+                last_error = "LLM返回了空结构（status=thinking, items为空）"
+                raise ValueError(last_error)
+            
             raw_keywords = result.get("keywords", [])
             if not raw_keywords and result.get("status") == "thinking":
                 # LLM 返回了纯数组，chat_json 包装成 {"status": "thinking", "items": [...]}
@@ -979,8 +984,8 @@ async def extract_chapter_snapshot(text: str, title: str) -> dict:
                 # 抽象词开头，加具体动作提示
                 pass  # 不强行修改，让 prompt 引导
 
-            # 必须有内容才算成功
-            if keywords or core_viewpoint:
+            # v1.20 优化：只要有任意有效字段就算成功（更宽容的验证）
+            if keywords or core_viewpoint or learning_goal:
                 return {
                     "keywords": keywords,
                     "core_viewpoint": core_viewpoint,
@@ -992,13 +997,14 @@ async def extract_chapter_snapshot(text: str, title: str) -> dict:
                 last_error = "LLM返回了空数据"
         except Exception as e:
             last_error = f"LLM调用失败: {e}"
-            import logging
-            logger2 = logging.getLogger(__name__)
-            logger2.warning(f"快照生成第{attempt+1}次尝试失败 [{title[:20]}]: {e}")
+        import logging
+        logger2 = logging.getLogger(__name__)
+        logger2.warning(f"快照生成第{attempt+1}次尝试失败 [{title[:20]}]: {last_error}")
 
         # 失败后等待再重试（给 API 恢复时间）
-        if attempt < 2:  # 前两次失败后等待，第3次是最后一次
-            await asyncio.sleep(2.0)
+        # v1.20: 增量退避，降低并发冲突
+        if attempt < 2:
+            await asyncio.sleep(2.0 * (2 ** attempt))  # 2s, 4s
 
     # 全部失败：使用文本回退（确保有内容而不是空）
     import logging
@@ -1214,6 +1220,11 @@ async def generate_global_highlights(course_id: str, snapshots: list, chapter_ti
                 {"role": "user", "content": prompt},
             ], temperature=0.3)
 
+            # v1.20: 检查 status 字段，如果是 thinking 且 items 为空，说明调用失败
+            if result.get("status") == "thinking" and not result.get("items"):
+                last_error = "LLM返回了空结构（status=thinking, items为空）"
+                raise ValueError(last_error)
+            
             key_points = result.get("key_points", [])
             chapter_priorities = result.get("chapter_priorities", [])
             chapter_dependencies = result.get("chapter_dependencies", {})
@@ -1306,7 +1317,12 @@ async def generate_global_highlights(course_id: str, snapshots: list, chapter_ti
         except Exception as e:
             last_error = f"LLM调用失败: {e}"
             import logging
-            logging.warning(f"全局精华生成第{attempt+1}次失败: {e}")
+            logging.warning(f"全局精华生成第{attempt+1}次失败: {last_error}")
+
+        # v1.20: 增量退避，降低并发冲突
+        if attempt < 2:
+            import asyncio
+            await asyncio.sleep(2.0 * (2 ** attempt))  # 2s, 4s
 
     # 全部失败：基于快照重要性自动计算（兜底）
     import logging
