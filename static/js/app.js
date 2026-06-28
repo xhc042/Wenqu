@@ -95,19 +95,43 @@ function showProgressOverlay(title, steps) {
     overlay.className = 'modal-overlay active';
     overlay.style.zIndex = '3000';
     overlay.style.backdropFilter = 'blur(4px)';
+    
+    // 记录开始时间
+    const startTime = Date.now();
+    
+    // 加载提示语
+    const tips = [
+        '正在理解书中内容...',
+        '正在分析章节结构...',
+        '正在生成学习目标...',
+        '稍等片刻，精彩即将呈现...',
+        'AI 正在深度思考中...',
+        '正在提炼核心知识点...',
+    ];
+    let currentTipIndex = 0;
+    
+    const getElapsedTime = () => {
+        const elapsed = Math.floor((Date.now() - startTime) / 1000);
+        if (elapsed < 60) return `${elapsed}秒`;
+        const mins = Math.floor(elapsed / 60);
+        const secs = elapsed % 60;
+        return `${mins}分${secs}秒`;
+    };
 
     overlay.innerHTML = `
         <div class="modal" style="width:520px;max-width:90vw">
             <div style="text-align:center;padding:24px 24px 16px">
                 <div style="font-size:48px;margin-bottom:12px;animation:pulse 2s infinite">${getProgressIcon(title)}</div>
                 <h2 style="margin:0 0 8px;font-size:18px;color:var(--text-primary)">${title}</h2>
-                <p id="progress-current-step" style="margin:0 0 20px;font-size:14px;color:var(--text-secondary)">准备中...</p>
+                <p id="progress-current-step" style="margin:0 0 8px;font-size:14px;color:var(--text-secondary)">准备中...</p>
+                <p id="progress-elapsed" style="margin:0;font-size:12px;color:var(--text-secondary);opacity:0.7">已用时 0秒</p>
             </div>
             <div style="padding:0 24px 24px">
-                <div class="progress-bar-outer" style="margin-bottom:20px;height:8px">
+                <div class="progress-bar-outer" style="margin-bottom:12px;height:8px">
                     <div id="progress-bar-fill" class="progress-bar-inner" style="width:0%;transition:width 0.5s ease"></div>
                 </div>
-                <div id="progress-steps-list" style="max-height:240px;overflow-y:auto">
+                <div id="progress-percentage" style="text-align:center;font-size:24px;font-weight:600;color:var(--primary);margin-bottom:16px">0%</div>
+                <div id="progress-steps-list" style="max-height:200px;overflow-y:auto">
                     ${steps.map((s, i) => `
                         <div class="progress-step" data-step="${i}" style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:8px;margin-bottom:4px;font-size:13px;color:var(--text-secondary)">
                             <span class="step-icon" style="width:20px;text-align:center;font-size:14px">⏳</span>
@@ -115,12 +139,29 @@ function showProgressOverlay(title, steps) {
                         </div>
                     `).join('')}
                 </div>
+                <div id="progress-tip" style="margin-top:16px;padding:12px;background:rgba(108,92,231,0.06);border-radius:8px;font-size:13px;color:var(--text-secondary);text-align:center">
+                    💡 ${tips[0]}
+                </div>
             </div>
         </div>
     `;
 
     document.body.appendChild(overlay);
     currentProgressOverlay = overlay;
+    
+    // 定时更新：已用时 + 加载提示
+    const timerInterval = setInterval(() => {
+        const elapsedEl = document.getElementById('progress-elapsed');
+        if (elapsedEl) {
+            elapsedEl.textContent = `已用时 ${getElapsedTime()}`;
+        }
+        // 每 3 秒切换一个提示语
+        const tipEl = document.getElementById('progress-tip');
+        if (tipEl) {
+            currentTipIndex = (currentTipIndex + 1) % tips.length;
+            tipEl.innerHTML = `💡 ${tips[currentTipIndex]}`;
+        }
+    }, 3000);
 
     // 添加脉冲动画
     if (!document.getElementById('progress-anim-style')) {
@@ -162,11 +203,16 @@ function showProgressOverlay(title, steps) {
         },
         setProgress: (percent) => {
             const fill = overlay.querySelector('#progress-bar-fill');
+            const pctEl = document.getElementById('progress-percentage');
             if (fill) fill.style.width = percent + '%';
+            if (pctEl) pctEl.textContent = percent + '%';
         },
         setTotalSteps: (total) => {
             const fill = overlay.querySelector('#progress-bar-fill');
             if (fill) fill.style.width = (total / steps.length * 100) + '%';
+        },
+        destroy: () => {
+            clearInterval(timerInterval);
         },
     };
 }
@@ -183,6 +229,10 @@ function getProgressIcon(title) {
 
 function hideProgressOverlay() {
     if (currentProgressOverlay) {
+        // 清理定时器
+        if (currentProgressOverlay._timerInterval) {
+            clearInterval(currentProgressOverlay._timerInterval);
+        }
         currentProgressOverlay.remove();
         currentProgressOverlay = null;
     }
@@ -199,26 +249,42 @@ function startTaskPolling(taskId) {
     }
     window.currentTaskId = taskId;
     
-    // 显示进度覆盖层
-    const progressCtrl = showProgressOverlay('正在智能分章...', ['分章处理', '生成教学大纲', '完成']);
+    // 先显示无步骤的加载状态（等首次轮询返回后补充步骤列表）
+    const progressCtrl = showProgressOverlay('正在导入...', []);
+    let stepsReady = false;
     
     const poll = async () => {
         try {
             const task = await API.get(`/api/tasks/${taskId}`);
             
-            // 更新进度条
-            progressCtrl.setProgress(task.progress);
-            
-            // 更新步骤状态
-            if (task.steps) {
+            // 首次返回时，用后端的 steps 动态渲染步骤列表
+            if (!stepsReady && task.steps && task.steps.length > 0) {
+                stepsReady = true;
+                const stepNames = task.steps.map(s => s.name);
+                // 重新创建带步骤的覆盖层
+                document.getElementById('progress-overlay')?.remove();
+                const newCtrl = showProgressOverlay('正在导入...', stepNames);
+                // 同步已有状态
+                newCtrl.setProgress(task.progress);
                 task.steps.forEach((step, index) => {
                     let status = 'pending';
                     if (step.status === 'done') status = 'done';
                     else if (step.status === 'processing' || step.status === 'error') status = 'active';
-                    
-                    const msg = step.detail || step.name;
-                    progressCtrl.updateStep(index, status, msg);
+                    newCtrl.updateStep(index, status, step.detail || step.name);
                 });
+                currentProgressCtrl = newCtrl;
+            } else {
+                // 更新进度条和步骤状态
+                progressCtrl.setProgress(task.progress);
+                if (task.steps) {
+                    task.steps.forEach((step, index) => {
+                        let status = 'pending';
+                        if (step.status === 'done') status = 'done';
+                        else if (step.status === 'processing' || step.status === 'error') status = 'active';
+                        const msg = step.detail || step.name;
+                        progressCtrl.updateStep(index, status, msg);
+                    });
+                }
             }
             
             // 检查任务是否完成或失败
@@ -760,9 +826,14 @@ function updateNonBlockingProgress(task) {
         fill.style.width = (task.progress || 0) + '%';
     }
     
-    if (statusText && task.steps && task.steps[task.current_step || 0]) {
-        const currentStep = task.steps[task.current_step || 0];
-        statusText.textContent = currentStep.detail || currentStep.name || '处理中...';
+    if (statusText) {
+        const pct = task.progress || 0;
+        let stepText = '处理中...';
+        if (task.steps && task.steps[task.current_step || 0]) {
+            const currentStep = task.steps[task.current_step || 0];
+            stepText = currentStep.detail || currentStep.name || '处理中...';
+        }
+        statusText.textContent = `${pct}% ${stepText}`;
     }
 }
 
