@@ -53,6 +53,18 @@ WebSocket /ws
 - 并发生成 `chapter_snapshots`(关键词/核心观点/学习目标/重要性)
 - 一次性生成 `global_highlights`(key_points / 章节优先级 / 关系图)
 - 用 `key_points` 按 `importance` round-robin 分配到 `syllabus_items`
+- **v1.3 P0：核心知识优先级链路**
+  - `syllabus_items.importance` 字段(1-5,5=最核心)
+    - 老库自动迁移:`_migrate_schema` 检查字段后 ALTER TABLE
+    - 写入端:`_run_speed_mode_postprocess` 按 key_points 排序生成梯度(前30%→5,中间40%→4,后30%→3)
+  - `chunker.generate_global_highlights` prompt 强化"本书独有"原则,禁止生成泛化模板
+  - `state_machine._get_mastery_hint/_check` 按 importance desc 取,文本含 `[重要度N/5]` 标记
+  - SHARE 阶段:优先揭示核心观点,不从基础概念开始
+  - PROBE 阶段:必须先攻高重要度知识点,显式禁止停留在基础定义
+- **事务包装**：`_persist_speed_results` 使用 SQLite 事务确保数据一致性(修复 v1.1 第二轮审查 P1-②)
+  - 三步写入(快照→精华→掌握项)在同一事务中
+  - 任何步骤失败自动回滚，不会写入部分数据
+- **统一章节保存**：`_save_chapters_to_db()` 消除 `run_chapter_generation` 和 `generate_chapters` 重复逻辑(修复 v1.1 第二轮审查 P2)
 
 ## 关键模块速查
 
@@ -66,8 +78,10 @@ WebSocket /ws
 
 ## 已知技术债
 
-1. **`async_tasks` 内存 dict** —— 服务重启会丢任务,未做 DB 持久化
+1. **`async_tasks` 内存 dict** —— 服务重启会丢任务,未做 DB 持久化(**已修复**：`run_chapter_generation` 增加 `finally` 清理)
 2. **`app.py` 105KB 单文件** —— 路由 + 业务逻辑混杂,建议拆 `routers/`
-3. **测试覆盖率 0%** —— P0 模块(chunkier / state_machine)优先补
+3. **测试覆盖率 0%** —— P0 模块(chunkier / state_machine)优先补(**已更新**：v1.1 第二轮审查新增 `test_utc_format.py`, `test_save_chapters.py`, `test_generate_chapters_structure.py`)
 4. **PDF 导入未支持** —— `app.py` 显式 400 拒绝,产品决策
 5. **多用户未支持** —— SQLite 单文件,适合单机;要做多用户要换 Postgres
+6. **WebSocket 会话清理** —— 客户端异常断开可能导致僵尸会话(**待修复**：v1.1 第二轮审查 P1-⑤)
+7. **LLM 配置同步分散** —— startup / `_sync_llm_from_db` / `update_llm_settings` 多处重复(**待修复**：v1.1 第二轮审查 P2-⑧)
