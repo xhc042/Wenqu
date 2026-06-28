@@ -11,7 +11,7 @@ import io
 import re
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
@@ -28,7 +28,13 @@ from config import (
 )
 from database import init_db
 import database as db
-from chunker import extract_text, smart_chunk, generate_syllabus_items, generate_course_summary, extract_chapter_snapshot, generate_global_highlights, generate_speed_read_syllabus
+from chunker import (
+    extract_text, smart_chunk, generate_syllabus_items, generate_course_summary,
+    extract_chapter_snapshot, extract_chapter_snapshots_batch,
+    generate_global_highlights,
+    # generate_speed_read_syllabus 在 v1.1.2 已被 key_points 替代（P1-①），
+    # v1.2.0 标记 deprecated，v1.3.0 移除
+)
 from state_machine import DialogueStateMachine
 from llm_client import llm
 
@@ -57,6 +63,222 @@ def _utc_dict(d, field):
 
 def _utc_list(items, field):
     return [_utc_dict(item, field) for item in items] if items else []
+
+
+async def _run_speed_mode_postprocess(
+    course_id: str,
+    chapters: list,
+    chapter_titles: List[str],
+    source_type: str,
+    source_path: str,
+    concurrency: int = 3,
+) -> dict:
+    """
+    speed 模式后处理（修复 P0-①：消除 3 处重复代码）
+
+    流程：
+    1. 准备 (chapter_idx, title, content) 三元组
+    2. 并发生成快照（P0-② extract_chapter_snapshots_batch）
+    3. 生成全局精华（generate_global_highlights）
+    4. 生成精华掌握项（generate_speed_read_syllabus，v1.1.2 替换为 key_points）
+    5. fallback（P1-④）：syllabus 为空时用 snapshot.learning_goal 兜底
+
+    Returns:
+        {
+            "snapshots": List[dict],
+            "snapshots_by_idx": Dict[int, dict],
+            "highlights": dict,
+            "syllabus_items": List[Tuple[int, str]],
+        }
+    """
+    import asyncio
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # --- Step 1: 准备 chapter_idx/content/title ---
+    chapter_data: List[Tuple[int, str, str]] = []
+    for chapter_item in chapters:
+        if isinstance(chapter_item, tuple) and len(chapter_item) >= 3:
+            title, content, meta = chapter_item[0], chapter_item[1], chapter_item[2]
+            chapter_idx = meta.get("idx", 0)
+        elif isinstance(chapter_item, tuple) and len(chapter_item) >= 2:
+            title, content = chapter_item[0], chapter_item[1]
+            chapter_idx = 0
+        else:
+            continue
+        chapter_data.append((chapter_idx, title, content))
+
+    # --- Step 2: 并发生成快照（P0-②）---
+    snapshots: List[dict] = []
+    snapshot_by_idx: Dict[int, dict] = {}
+
+    # 2a. 对 EPUB 场景：每章用完整内容（不限首尾）作为快照输入
+    if source_type == "epub" and source_path:
+        from chunker import extract_toc_from_epub, extract_chapter_content_by_href
+        try:
+            toc_items, _ = await extract_toc_from_epub(source_path)
+            href_by_idx = {t.get("idx"): t.get("href", "") for t in toc_items}
+        except Exception as e:
+            logger.warning(f"[speed] TOC 提取失败，回退到 chapters 内容: {e}")
+            href_by_idx = {}
+
+        chapters_for_snapshot = []
+        for ch_idx, title, content in chapter_data:
+            href = href_by_idx.get(ch_idx, "")
+            snapshot_content = content
+            if href:
+                try:
+                    full = await extract_chapter_content_by_href(source_path, href)
+                    if full:
+                        snapshot_content = full
+                except Exception as e:
+                    logger.warning(f"[speed] EPUB 内容提取失败 [{title[:20]}]: {e}")
+            chapters_for_snapshot.append((ch_idx, title, snapshot_content))
+
+        try:
+            snapshot_by_idx = await extract_chapter_snapshots_batch(
+                chapters_for_snapshot, concurrency=concurrency,
+            )
+        except Exception as e:
+            logger.warning(f"[speed] 批量快照失败，回退串行: {e}")
+            snapshot_by_idx = {}
+
+        if not snapshot_by_idx:
+            # 回退：同步串行
+            for ch_idx, title, snapshot_content in chapters_for_snapshot:
+                if not snapshot_content:
+                    continue
+                try:
+                    snap = await extract_chapter_snapshot(snapshot_content, title)
+                    snapshot_by_idx[ch_idx] = snap
+                except Exception as e:
+                    logger.warning(f"[speed] 串行快照失败 [{title[:20]}]: {e}")
+    else:
+        # 非 EPUB：用 chapters 里的 content
+        try:
+            snapshot_by_idx = await extract_chapter_snapshots_batch(
+                chapter_data, concurrency=concurrency,
+            )
+        except Exception as e:
+            logger.warning(f"[speed] 批量快照失败，回退串行: {e}")
+            snapshot_by_idx = {}
+
+        if not snapshot_by_idx:
+            for ch_idx, title, content in chapter_data:
+                if not content:
+                    continue
+                try:
+                    snap = await extract_chapter_snapshot(content, title)
+                    snapshot_by_idx[ch_idx] = snap
+                except Exception as e:
+                    logger.warning(f"[speed] 串行快照失败 [{title[:20]}]: {e}")
+
+    snapshots = list(snapshot_by_idx.values())
+
+    # --- Step 3: 全局精华 ---
+    highlights: dict = {}
+    if snapshots:
+        try:
+            highlights = await generate_global_highlights(course_id, snapshots, chapter_titles)
+        except Exception as e:
+            logger.warning(f"[speed] 全局精华生成失败: {e}")
+            highlights = {}
+
+    # --- Step 4: 精华掌握项（P1-① v1.1.2：用 global_highlights.key_points 替代 generate_speed_read_syllabus）---
+    # 原因：
+    #   1. `key_points` 已经是"全书 5-10 个核心知识点"，再调一次 LLM 冗余
+    #   2. generate_speed_read_syllabus 有 `chapter_info[:20]` 截断，长书后 N 章不进 prompt
+    #   3. key_points 路径节省 1 次 LLM 调用 + token 消耗
+    syllabus_items: List[Tuple[int, str]] = []
+    key_points = highlights.get("key_points", []) if isinstance(highlights, dict) else []
+
+    if key_points:
+        # 按 snapshot.importance 降序排序，importance 高的章节分配更多 key_points
+        sorted_snaps = sorted(
+            snapshot_by_idx.items(),
+            key=lambda kv: kv[1].get("importance", 3),
+            reverse=True,
+        )
+        # round-robin 分配：每个 key_point 分配到当前 importance 最高的章节
+        for i, kp in enumerate(key_points[:15]):
+            if sorted_snaps:
+                target_ch_idx = sorted_snaps[i % len(sorted_snaps)][0]
+            else:
+                target_ch_idx = 0
+            syllabus_items.append((target_ch_idx, kp))
+
+    # --- Step 5: fallback（P1-④）---
+    if not syllabus_items and snapshots:
+        for ch_idx, snap in snapshot_by_idx.items():
+            goal = (snap.get("learning_goal", "") or "").strip()
+            if goal:
+                syllabus_items.append((ch_idx, goal))
+            if len(syllabus_items) >= 10:
+                break
+
+    return {
+        "snapshots": snapshots,
+        "snapshots_by_idx": snapshot_by_idx,
+        "highlights": highlights,
+        "syllabus_items": syllabus_items,
+    }
+
+
+async def _persist_speed_results(course_id: str, result: dict) -> None:
+    """
+    把 speed 模式后处理结果写入数据库（独立函数便于测试）
+    修复 P0-①：抽离 DB 写入逻辑
+    """
+    import json
+    import logging
+    logger = logging.getLogger(__name__)
+
+    snapshots_by_idx = result.get("snapshots_by_idx", {})
+
+    # 1. 写 chapter_snapshots
+    for ch_idx, snapshot in snapshots_by_idx.items():
+        try:
+            db.add_chapter_snapshot(
+                course_id, ch_idx,
+                json.dumps(snapshot.get("keywords", []), ensure_ascii=False),
+                snapshot.get("core_viewpoint", ""),
+                global_priority=snapshot.get("importance", 0),
+                learning_goal=snapshot.get("learning_goal", ""),
+                importance=snapshot.get("importance", 0),
+                difficulty=snapshot.get("difficulty", ""),
+            )
+        except Exception as e:
+            logger.warning(f"[speed] 写 chapter_snapshot 失败 [{ch_idx}]: {e}")
+
+    # 2. 写 global_highlights
+    highlights = result.get("highlights", {}) or {}
+    if highlights:
+        try:
+            db.add_global_highlights(
+                course_id,
+                json.dumps(highlights.get("key_points", []), ensure_ascii=False),
+                json.dumps(highlights.get("chapter_priorities", []), ensure_ascii=False),
+                highlights.get("relationships", ""),
+                json.dumps(highlights.get("core_chapter_indices", []), ensure_ascii=False),
+                json.dumps(highlights.get("chapter_dependencies", {}), ensure_ascii=False),
+            )
+        except Exception as e:
+            logger.warning(f"[speed] 写 global_highlights 失败: {e}")
+
+    # 3. 删旧 syllabus_items + 写新的
+    syllabus_items = result.get("syllabus_items", [])
+    if syllabus_items:
+        try:
+            _conn = db.get_conn()
+            try:
+                _conn.execute("DELETE FROM syllabus_items WHERE course_id=?", (course_id,))
+                _conn.commit()
+            finally:
+                _conn.close()
+            for ch_idx, desc in syllabus_items:
+                db.add_syllabus_item(course_id, ch_idx, desc)
+        except Exception as e:
+            logger.warning(f"[speed] 写 syllabus_items 失败: {e}")
 
 
 def _add_default_syllabus_items(course_id: str, chapters: list):
@@ -238,6 +460,9 @@ async def run_chapter_generation(task_id: str):
             
             if is_speed:
                 is_loaded = 0
+                # speed 模式下，chapters 列表里 content 已经过 _sample_first_last(≤600字) 采样
+                # 此处保留 500 字截断以确保 DB content_slice ≤ 600 字（验收标准）
+                # v1.2 可考虑改为 content_short = content（完全保留采样结果）
                 content_short = content[:500] if content else ""
             else:
                 is_loaded = 1 if idx < max_loaded else 0
@@ -258,76 +483,19 @@ async def run_chapter_generation(task_id: str):
         
         db.add_learning_event(course_id, "lesson_end", {"action": "chapters_generated", "count": len(chapters)})
         
-        # 速读模式额外处理
+        # 速读模式额外处理（P0-①：抽离为独立函数，3 处复用同一份逻辑）
         if is_speed:
             task["steps"][0]["detail"] = "正在生成知识快照..."
             try:
-                snapshots = []
-                for chapter_item in chapters:
-                    if isinstance(chapter_item, tuple) and len(chapter_item) >= 3:
-                        title, content, meta = chapter_item[0], chapter_item[1], chapter_item[2]
-                        chapter_idx = meta.get("idx", 0)
-                    elif isinstance(chapter_item, tuple) and len(chapter_item) >= 2:
-                        title, content = chapter_item[0], chapter_item[1]
-                        chapter_idx = 0
-                    else:
-                        continue
-                    
-                    snapshot_content = ""
-                    if source_type == "epub" and source_path:
-                        from chunker import extract_toc_from_epub, extract_chapter_content_by_href
-                        toc_items, _ = await extract_toc_from_epub(source_path)
-                        for toc_item in toc_items:
-                            if toc_item.get("idx") == chapter_idx:
-                                href = toc_item.get("href", "")
-                                if href:
-                                    snapshot_content = await extract_chapter_content_by_href(source_path, href)
-                                break
-                    
-                    if not snapshot_content:
-                        snapshot_content = content
-                    
-                    if not snapshot_content:
-                        continue
-                    
-                    snapshot = await extract_chapter_snapshot(snapshot_content, title)
-                    snapshots.append(snapshot)
-                    db.add_chapter_snapshot(
-                        course_id, chapter_idx,
-                        json.dumps(snapshot.get("keywords", []), ensure_ascii=False),
-                        snapshot.get("core_viewpoint", ""),
-                        global_priority=snapshot.get("importance", 0),
-                        learning_goal=snapshot.get("learning_goal", ""),
-                        importance=snapshot.get("importance", 0),
-                        difficulty=snapshot.get("difficulty", ""),
-                    )
-                
-                if snapshots:
-                    task["steps"][0]["detail"] = "正在提炼全局精华..."
-                    highlights = await generate_global_highlights(course_id, snapshots, chapter_titles)
-                    db.add_global_highlights(
-                        course_id,
-                        json.dumps(highlights.get("key_points", []), ensure_ascii=False),
-                        json.dumps(highlights.get("chapter_priorities", []), ensure_ascii=False),
-                        highlights.get("relationships", ""),
-                        json.dumps(highlights.get("core_chapter_indices", []), ensure_ascii=False),
-                        json.dumps(highlights.get("chapter_dependencies", {}), ensure_ascii=False),
-)
-
-                    try:
-                        syllabus_items = await generate_speed_read_syllabus(course_id, chapters, snapshots)
-                        if syllabus_items:
-                            # 先删旧数据避免重复
-                            _sc = db.get_conn()
-                            try:
-                                _sc.execute("DELETE FROM syllabus_items WHERE course_id=?", (course_id,))
-                                _sc.commit()
-                            finally:
-                                _sc.close()
-                            for ch_idx, desc in syllabus_items:
-                                db.add_syllabus_item(course_id, ch_idx, desc)
-                    except Exception:
-                        pass
+                result = await _run_speed_mode_postprocess(
+                    course_id, chapters, chapter_titles,
+                    source_type, source_path, concurrency=3,
+                )
+                await _persist_speed_results(course_id, result)
+                task["steps"][0]["detail"] = (
+                    f"快照 {len(result['snapshots'])} 章，"
+                    f"掌握项 {len(result['syllabus_items'])} 条"
+                )
             except Exception as e:
                 import logging
                 logging.warning(f"速读模式快照生成失败: {e}")
@@ -707,6 +875,9 @@ async def generate_chapters(course_id: str):
         # 决定是否已加载
         if is_speed:
             is_loaded = 0
+            # speed 模式下，chapters 列表里 content 已经过 _sample_first_last(≤600字) 采样
+            # 此处保留 500 字截断以确保 DB content_slice ≤ 600 字（验收标准）
+            # v1.2 可考虑改为 content_short = content（完全保留采样结果）
             content_short = content[:500] if content else ""
         else:
             is_loaded = 1 if idx < max_loaded else 0
@@ -727,91 +898,34 @@ async def generate_chapters(course_id: str):
 
     db.add_learning_event(course_id, "lesson_end", {"action": "chapters_generated", "count": len(chapters)})
 
-    # 速读模式：额外生成知识快照和全局精华
+    # 速读模式：额外生成知识快照和全局精华（P0-①：抽离为独立函数）
     if is_speed:
         import logging
         logging.info(f"[速读模式] 开始生成知识快照，共 {len(chapters)} 章")
         try:
-            # 为每章生成知识快照
-            snapshots = []
-            for chapter_item in chapters:
-                # 从 meta 中获取实际的 chapter_index（与 chapters 表一致）
-                if isinstance(chapter_item, tuple) and len(chapter_item) >= 3:
-                    title, content, meta = chapter_item[0], chapter_item[1], chapter_item[2]
-                    chapter_idx = meta.get("idx", 0)
-                elif isinstance(chapter_item, tuple) and len(chapter_item) >= 2:
-                    title, content = chapter_item[0], chapter_item[1]
-                    chapter_idx = 0
-                else:
-                    continue
+            result = await _run_speed_mode_postprocess(
+                course_id, chapters, chapter_titles,
+                source_type, source_path, concurrency=3,
+            )
+            await _persist_speed_results(course_id, result)
 
-                logging.info(f"[速读模式] 处理第 {chapter_idx} 章: {title[:30]}")
+            snapshots = result["snapshots"]
+            highlights = result["highlights"]
 
-                # 速读模式：从 EPUB 提取更多内容用于快照（不限于首尾段）
-                snapshot_content = ""
-                if source_type == "epub" and source_path:
-                    from chunker import extract_toc_from_epub, extract_chapter_content_by_href
-                    toc_items, _ = await extract_toc_from_epub(source_path)
-                    for toc_item in toc_items:
-                        if toc_item.get("idx") == chapter_idx:
-                            href = toc_item.get("href", "")
-                            if href:
-                                snapshot_content = await extract_chapter_content_by_href(source_path, href)
-                            break
+            # 用新生成的 highlights 重新计算 core_indices（用于返回结构）
+            new_core_indices = set()
+            if isinstance(highlights, dict):
+                import re as _re
+                for s in highlights.get("core_chapter_indices", []):
+                    m = _re.search(r'第(\d+)章', str(s))
+                    if m:
+                        new_core_indices.add(int(m.group(1)) - 1)
+            if new_core_indices:
+                core_indices = new_core_indices
 
-                # 如果没有从 EPUB 提取到内容，使用 chapters 中已有内容
-                if not snapshot_content:
-                    snapshot_content = content
-
-                if not snapshot_content:
-                    logging.warning(f"[速读模式] 第 {chapter_idx} 章无内容")
-                    continue
-
-                snapshot = await extract_chapter_snapshot(snapshot_content, title)
-                logging.info(f"[速读模式] 快照结果: keywords={len(snapshot.get('keywords', []))}, viewpoint={snapshot.get('core_viewpoint', '')[:30]}, importance={snapshot.get('importance', 0)}, fallback={snapshot.get('_fallback', False)}")
-                snapshots.append(snapshot)
-                db.add_chapter_snapshot(
-                    course_id, chapter_idx,
-                    json.dumps(snapshot.get("keywords", []), ensure_ascii=False),
-                    snapshot.get("core_viewpoint", ""),
-                    global_priority=snapshot.get("importance", 0),  # 用重要性作为优先级
-                    learning_goal=snapshot.get("learning_goal", ""),
-                    importance=snapshot.get("importance", 0),
-                    difficulty=snapshot.get("difficulty", ""),
-                )
-
-            # 全局精华提炼（只做一次）
-            if snapshots:
-                logging.info(f"[速读模式] 生成全局精华，共 {len(snapshots)} 个快照")
-                highlights = await generate_global_highlights(course_id, snapshots, chapter_titles)
-                db.add_global_highlights(
-                    course_id,
-                    json.dumps(highlights.get("key_points", []), ensure_ascii=False),
-                    json.dumps(highlights.get("chapter_priorities", []), ensure_ascii=False),
-                    highlights.get("relationships", ""),
-                    json.dumps(highlights.get("core_chapter_indices", []), ensure_ascii=False),
-                    json.dumps(highlights.get("chapter_dependencies", {}), ensure_ascii=False),
-                )
-
-                # 速读模式：生成精简掌握项（只提取最重要的20%知识点）
-                logging.info(f"[速读模式] 开始生成精华掌握项")
-                try:
-                    syllabus_items = await generate_speed_read_syllabus(course_id, chapters, snapshots)
-                    if syllabus_items:
-                        # 先删旧数据避免重复
-                        _sc3 = db.get_conn()
-                        try:
-                            _sc3.execute("DELETE FROM syllabus_items WHERE course_id=?", (course_id,))
-                            _sc3.commit()
-                        finally:
-                            _sc3.close()
-                        for ch_idx, desc in syllabus_items:
-                            db.add_syllabus_item(course_id, ch_idx, desc)
-                    logging.info(f"[速读模式] 完成，生成了 {len(syllabus_items)} 条精华掌握项")
-                except Exception as syllabus_err:
-                    logging.warning(f"[速读模式] 精华掌握项生成失败: {syllabus_err}")
-
-            logging.info(f"[速读模式] 完成，生成了 {len(snapshots)} 个快照")
+            logging.info(
+                f"[速读模式] 完成，快照 {len(snapshots)} 章，掌握项 {len(result['syllabus_items'])} 条"
+            )
             return {
                 "total_chapters": len(chapters),
                 "snapshots_generated": len(snapshots),
@@ -834,6 +948,7 @@ async def generate_chapters(course_id: str):
             }
         except Exception as e:
             # 快照生成失败不影响主流程
+            import logging
             logging.warning(f"速读模式快照生成失败: {e}")
             import traceback
             logging.warning(traceback.format_exc())
@@ -2338,103 +2453,52 @@ async def generate_snapshots(course_id: str):
     source_type = course.get("source_type", "")
     source_path = course.get("source_path", "")
 
-    snapshots = []
-    failed_chapters = []
+    # P0-①：抽离为统一函数（与 run_chapter_generation / generate_chapters 共用同一份逻辑）
+    # 旧实现有"懒加载"逻辑：EPUB 内容短时从 EPUB 重新加载。helper 函数内已处理（基于 toc_items）。
+    try:
+        chapter_list = []
+        for ch in chapters:
+            content = ch.get("content_slice", "") or ch.get("content_full", "")
+            chapter_list.append((ch["title"], content, {"idx": ch["idx"]}))
+        chapter_titles = [ch["title"] for ch in chapters]
 
-    for ch in chapters:
-        # 加载章节内容（多种来源）
-        content = ch.get("content_slice", "") or ch.get("content_full", "")
+        result = await _run_speed_mode_postprocess(
+            course_id, chapter_list, chapter_titles,
+            source_type, source_path, concurrency=3,
+        )
+        await _persist_speed_results(course_id, result)
 
-        # 如果内容太短且是EPUB，从EPUB重新加载完整内容
-        if source_type == "epub" and source_path and len(content) < 1000:
-            try:
-                from chunker import extract_chapter_content_by_href
-                # 找到对应的href
-                href = ch.get("href", "")
-                if href:
-                    full_content = await extract_chapter_content_by_href(source_path, href)
-                    if full_content:
-                        content = full_content
-            except Exception as e:
-                import logging
-                logging.warning(f"懒加载章节 {ch['idx']} 失败: {e}")
+        snapshots = result["snapshots"]
+        snapshot_by_idx = result["snapshots_by_idx"]
+        highlights = result["highlights"]
+        syllabus_items = result["syllabus_items"]
 
-        if not content or len(content.strip()) < 50:
-            failed_chapters.append(ch["idx"])
-            continue
+        highlights_result = {
+            "key_points_count": len(highlights.get("key_points", [])) if isinstance(highlights, dict) else 0,
+            "core_chapters_count": len(highlights.get("core_chapter_indices", [])) if isinstance(highlights, dict) else 0,
+            "is_fallback": highlights.get("_fallback", False) if isinstance(highlights, dict) else False,
+        } if highlights else None
 
-        try:
-            snapshot = await extract_chapter_snapshot(content, ch["title"])
-            snapshots.append(snapshot)
-            db.add_chapter_snapshot(
-                course_id, ch["idx"],
-                json.dumps(snapshot.get("keywords", []), ensure_ascii=False),
-                snapshot.get("core_viewpoint", ""),
-                global_priority=snapshot.get("importance", 0),
-                learning_goal=snapshot.get("learning_goal", ""),
-                importance=snapshot.get("importance", 0),
-                difficulty=snapshot.get("difficulty", ""),
-            )
-        except Exception as e:
-            import logging
-            logging.warning(f"生成章节 {ch['idx']} 快照失败: {e}")
-            failed_chapters.append(ch["idx"])
+        # failed_chapters：原字段为重生成失败的章节。新实现下用 snapshot_by_idx 缺失的章节推算
+        all_idxs = {ch["idx"] for ch in chapters}
+        success_idxs = set(snapshot_by_idx.keys())
+        failed_chapters = sorted(all_idxs - success_idxs)
 
-    # 全局精华提炼
-    highlights_result = None
-    if snapshots:
-        chapter_titles = [ch["title"] for ch in chapters if ch["idx"] not in failed_chapters]
-        try:
-            highlights = await generate_global_highlights(course_id, snapshots, chapter_titles)
-            db.add_global_highlights(
-                course_id,
-                json.dumps(highlights.get("key_points", []), ensure_ascii=False),
-                json.dumps(highlights.get("chapter_priorities", []), ensure_ascii=False),
-                highlights.get("relationships", ""),
-                json.dumps(highlights.get("core_chapter_indices", []), ensure_ascii=False),
-                json.dumps(highlights.get("chapter_dependencies", {}), ensure_ascii=False),
-            )
-            highlights_result = {
-                "key_points_count": len(highlights.get("key_points", [])),
-                "core_chapters_count": len(highlights.get("core_chapter_indices", [])),
-                "is_fallback": highlights.get("_fallback", False),
-            }
-        except Exception as e:
-            import logging
-            logging.error(f"生成全局精华失败: {e}")
-
-    # 速读模式：生成精华掌握项
-    syllabus_count = 0
-    if snapshots:
-        try:
-            from chunker import generate_speed_read_syllabus
-            # 转换 chapters 格式给 generate_speed_read_syllabus
-            chapter_list = []
-            for ch in chapters:
-                content = ch.get("content_slice", "") or ch.get("content_full", "")
-                chapter_list.append((ch["title"], content, {"idx": ch["idx"]}))
-            syllabus_items = await generate_speed_read_syllabus(course_id, chapter_list, snapshots)
-            if syllabus_items:
-                # 先删旧数据避免重复
-                _sc2 = db.get_conn()
-                try:
-                    _sc2.execute("DELETE FROM syllabus_items WHERE course_id=?", (course_id,))
-                    _sc2.commit()
-                finally:
-                    _sc2.close()
-                for ch_idx, desc in syllabus_items:
-                    db.add_syllabus_item(course_id, ch_idx, desc)
-            syllabus_count = len(syllabus_items)
-        except Exception as e:
-            import logging
-            logging.error(f"生成精华掌握项失败: {e}")
-
-    return {
-        "snapshots_generated": len(snapshots),
-        "snapshots_failed": failed_chapters,
-        "highlights": highlights_result,
-        "syllabus_generated": syllabus_count,
-    }
+        return {
+            "snapshots_generated": len(snapshots),
+            "snapshots_failed": failed_chapters,
+            "highlights": highlights_result,
+            "syllabus_generated": len(syllabus_items),
+        }
+    except Exception as e:
+        import logging
+        logging.error(f"重建快照失败: {e}")
+        return {
+            "snapshots_generated": 0,
+            "snapshots_failed": [ch["idx"] for ch in chapters],
+            "highlights": None,
+            "syllabus_generated": 0,
+        }
 
 
 # ==================== 思辨笔记 API ====================

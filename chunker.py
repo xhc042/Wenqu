@@ -639,12 +639,23 @@ def _clean_chapter_title(title: str, content: str = "") -> str:
 
 
 def _sample_first_last(text: str, max_per_sample: int = 300) -> str:
-    """取文本的首段和尾段作为预览"""
+    """速读模式章节内容采样
+
+    - 多段：取首段 + 尾段
+    - 单段：退化为均匀采样（避免信息丢失）
+
+    修复 P1-③：EPUB 整章塞进单个 <p> 的场景很多，原实现只取前 300 字，
+    丢失 99% 内容。改为退化为 sample_chapter_fairly 均匀采样。
+    """
     paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
     if not paragraphs:
         return text[:max_per_sample]
+
     if len(paragraphs) == 1:
-        return paragraphs[0][:max_per_sample]
+        # 单段场景：用均匀采样保留头尾 + 中段
+        # 目标 max_per_sample * 2 字（≈600 字）
+        sampled = sample_chapter_fairly(text, target_chars=max_per_sample * 2)
+        return sampled
 
     first = paragraphs[0][:max_per_sample]
     last = paragraphs[-1][:max_per_sample]
@@ -817,18 +828,36 @@ NON_CORE_TITLE_PATTERNS = [
     _re.compile(r'^(序)$|^(序[一二三四五六七八九十])$'),
 ]
 
+# P3-①: 关键词白名单（标题包含这些词也算元数据章节）
+# 注意：未包含"引言"——避免误判正文章节"第一章 引言"等
+NON_CORE_TITLE_KEYWORDS = {
+    "序", "跋", "后记", "致谢", "鸣谢", "简介", "提要", "凡例",
+    "出版说明", "写在前面", "编者按", "声明", "告白", "代序",
+    "引子", "楔子", "前言", "序言", "自序", "卷首语",
+}
+
 
 def is_non_core_chapter(title: str) -> bool:
     """
     判断章节是否为元数据章节（序言/前言/自序/附录等）
     这些章节不应作为核心章节推荐
+
+    P3-①: 在原前缀匹配基础上，叠加关键词白名单（"卷首语" / "代序" / "第N章 序论" 等）
     """
     if not title:
         return True
     title = title.strip()
+
+    # 1. 现有前缀匹配
     for pat in NON_CORE_TITLE_PATTERNS:
         if pat.match(title):
             return True
+
+    # 2. 关键词白名单
+    for kw in NON_CORE_TITLE_KEYWORDS:
+        if kw in title:
+            return True
+
     return False
 
 
@@ -951,6 +980,47 @@ async def extract_chapter_snapshot(text: str, title: str) -> dict:
     }
 
 
+async def extract_chapter_snapshots_batch(
+    chapters: List[Tuple[int, str, str]],
+    concurrency: int = 3,
+) -> Dict[int, dict]:
+    """
+    并发生成多个章节的快照（修复 P0-②）
+
+    50 章串行 ≈ 150s → 并发 3 ≈ 50s
+    - 输入：[(chapter_idx, title, content), ...]
+    - 输出：{chapter_idx: snapshot}
+    - 失败隔离：单章失败不影响其他章
+    - 顺序保证：gather 返回 (idx, snap) 元组，按 idx 索引
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _gen(idx: int, title: str, content: str):
+        async with sem:
+            try:
+                snap = await extract_chapter_snapshot(content, title)
+                return idx, snap
+            except Exception as e:
+                logger.warning(f"批量快照生成失败 [{title[:20]}]: {e}")
+                return idx, None
+
+    tasks = [_gen(idx, title, content) for idx, title, content in chapters]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    out: Dict[int, dict] = {}
+    for r in results:
+        if isinstance(r, Exception):
+            logger.warning(f"[speed] gather 异常: {r}")
+            continue
+        idx, snap = r
+        if snap:
+            out[idx] = snap
+    return out
+
+
 def _extract_keywords_fallback(text: str, title: str, max_count: int = 5) -> list:
     """
     兜底关键词提取：不调用LLM，用基础NLP方法
@@ -1043,10 +1113,44 @@ async def generate_global_highlights(course_id: str, snapshots: list, chapter_ti
 
             # 过滤掉元数据章节（序言/前言/自序/附录等）
             # 注意：core_chapter_indices 是形如"第N章"的字符串
-            import re
+            # P3-②: 扩展支持中文数字 + 英文 Chapter 5 / Chap. 5
+            import re as _re_parse
+
+            _CN_NUM = {
+                '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+                '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
+            }
+
             def _parse_chapter_num(s: str) -> int:
-                m = re.search(r'第(\d+)章', str(s))
-                return int(m.group(1)) - 1 if m else -1
+                """解析章节号，支持：
+                - 第N章 / 第N部分（阿拉伯数字）
+                - 第N章（中文数字，如"第五章"）
+                - Chapter 5 / Chap. 5（英文）
+                返回 0-based 索引，未匹配返回 -1
+                """
+                s = str(s)
+                # 1. 阿拉伯数字
+                m = _re_parse.search(r'第(\d+)[章部分]', s)
+                if m:
+                    return int(m.group(1)) - 1
+                # 2. 中文数字（处理"十"和"十X"）
+                m = _re_parse.search(r'第([一二三四五六七八九十]+)[章部分]', s)
+                if m:
+                    cn = m.group(1)
+                    if cn == '十':
+                        return 9  # "第十章" → index 9
+                    if cn.startswith('十'):
+                        return 9 + _CN_NUM.get(cn[1:], 0)  # 十一/十二/.../十九
+                    if cn.endswith('十'):
+                        # 二十/三十/.../九十
+                        tens = _CN_NUM.get(cn[0], 0)
+                        return tens * 10 - 1
+                    return _CN_NUM.get(cn, -1) - 1
+                # 3. 英文
+                m = _re_parse.search(r'(?:Chapter|Chap\.?)\s*(\d+)', s, _re_parse.IGNORECASE)
+                if m:
+                    return int(m.group(1)) - 1
+                return -1
 
             core_chapter_indices = [
                 s for s in (core_chapter_indices or [])
@@ -1224,7 +1328,18 @@ async def generate_speed_read_syllabus(course_id: str, chapters: list, snapshots
     速读模式：只生成全书最重要的20%知识点（精华掌握项）
     基于知识快照和全局精华，精选最核心的掌握项
     返回 [(chapter_index, description), ...]
+
+    [DEPRECATED] 自 v1.1.2 起被 app._run_speed_mode_postprocess 中的 key_points 路径替代
+    保留此函数仅为向后兼容，v1.3.0 将彻底删除
+    新实现见 app.py::_run_speed_mode_postprocess
     """
+    import warnings
+    warnings.warn(
+        "generate_speed_read_syllabus 已废弃，请改用 app._run_speed_mode_postprocess "
+        "(内部直接用 global_highlights.key_points)",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     if not chapters or not snapshots:
         return []
 
@@ -1262,13 +1377,14 @@ async def generate_speed_read_syllabus(course_id: str, chapters: list, snapshots
         for c in chapter_info[:20]  # 最多处理20章
     ])
 
-    prompt = f"""你是课程设计专家。请从以下全书章节中，精选最重要的{target_count}个知识点，生成精华掌握项清单。
+    prompt = f"""你是课程设计专家。请从以下全书章节中，精选**不超过 {target_count} 个**最重要的知识点，生成精华掌握项清单。
 
 要求：
 1. 每条掌握项以"能..."开头
-2. 只选择全书最核心的概念和原理（最重要的20%）
+2. 只选择全书最核心的概念和原理（最重要的 20%）
 3. 优先选择跨章节关联的知识点
 4. 避免重复，选择真正有区分度的知识点
+5. 如果章节内容不足以支撑 {target_count} 条，宁少勿滥
 
 全书章节概览：
 {chapter_summary}

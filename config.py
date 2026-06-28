@@ -139,6 +139,13 @@ READING_MODE_CONFIG = {
 
 DEFAULT_READING_MODE = "standard"
 
+# 阅读模式 → 认知深度 映射（P2-⑤ 一致性断言用）
+READING_MODE_TO_DEPTH = {
+    "speed": "basic",
+    "standard": "standard",
+    "deep": "deep",
+}
+
 # 心流检测参数
 FLOW_DETECTION = {
     "min_rounds": 3,

@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Optional, AsyncGenerator, List
 
 from llm_client import llm, build_system_prompt
-from config import FLOW_DETECTION, DEPTH_CONFIG
+from config import FLOW_DETECTION, DEPTH_CONFIG, READING_MODE_TO_DEPTH
 import database as db
 
 
@@ -105,6 +105,18 @@ class DialogueStateMachine:
         self.chapter_info = db.get_chapter(self.course_id, self.chapter_index) or {}
         self.syllabus_items = db.get_syllabus_items(self.course_id)
 
+        # P2-⑤: depth 与 reading_mode 一致性断言
+        # 通过 READING_MODE_TO_DEPTH 反推 expected_depth，与 self.depth 对比
+        reading_mode = self.course_info.get("reading_mode")
+        if reading_mode:
+            expected_depth = READING_MODE_TO_DEPTH.get(reading_mode)
+            if expected_depth and self.depth != expected_depth:
+                import logging
+                logging.warning(
+                    f"[一致性] depth={self.depth} 与 reading_mode={reading_mode} 不匹配, "
+                    f"应为 {expected_depth} (course_id={self.course_id})"
+                )
+
         # 获取前序章节摘要
         chapters = db.get_chapters(self.course_id)
         for ch in chapters:
@@ -117,8 +129,16 @@ class DialogueStateMachine:
             self.sliders = sliders_db
 
     def _get_min_rounds(self) -> int:
-        """根据学习时长计算最小对话轮次"""
-        mapping = {15: 3, 30: 6, 60: 12}
+        """根据学习时长计算最小对话轮次
+
+        映射规则：
+        - 15min → 3 轮（快速浏览）
+        - 30min → 6 轮（标准学习）
+        - 60min → 12 轮（深度学习）
+        - 120min → 24 轮（沉浸式学习）
+        - 其他 → 6 轮（默认，与旧实现一致以避免行为变更）
+        """
+        mapping = {15: 3, 30: 6, 60: 12, 120: 24}
         return mapping.get(self.duration_minutes, 6)
 
     async def _build_system_prompt(self) -> str:
@@ -141,8 +161,13 @@ class DialogueStateMachine:
         self.started_at = datetime.now()
         system_prompt = await self._build_system_prompt()
 
-        # 获取章节内容
-        chapter_content = self.chapter_info.get("content_slice", "")
+        # P2-①: speed 模式用 snapshot + global_highlights 构造上下文（避免依赖章节原文）
+        reading_mode = self.course_info.get("reading_mode", "standard")
+        if reading_mode == "speed":
+            chapter_content = self._build_speed_chapter_context()
+        else:
+            # 获取章节内容
+            chapter_content = self.chapter_info.get("content_slice", "")
 
         # 构建初始消息
         self.messages = [
@@ -163,6 +188,48 @@ class DialogueStateMachine:
         # 进入SHARE状态
         async for chunk in self._share():
             yield chunk
+
+    def _build_speed_chapter_context(self) -> str:
+        """P2-①: speed 模式用 snapshot + global_highlights 构造上下文
+
+        章节原文（content_slice ≤ 600 字）只覆盖头尾，看不到中段。
+        用 snapshot 替代：包含 core_viewpoint / keywords / learning_goal，
+        再叠加全书精华 key_points，让对话不依赖章节原文。
+        """
+        parts: List[str] = []
+
+        # 1. 本章快照
+        snapshot = db.get_chapter_snapshot(self.course_id, self.chapter_index)
+        if snapshot:
+            parts.append("## 本章速览")
+            if snapshot.get("core_viewpoint"):
+                parts.append(f"**核心观点**：{snapshot['core_viewpoint']}")
+            if snapshot.get("keywords"):
+                # keywords 在 DB 里是 JSON 字符串
+                try:
+                    import json as _json
+                    kws = _json.loads(snapshot["keywords"]) if isinstance(snapshot["keywords"], str) else snapshot["keywords"]
+                except Exception:
+                    kws = []
+                if kws:
+                    parts.append(f"**关键词**：{', '.join(str(k) for k in kws)}")
+            if snapshot.get("learning_goal"):
+                parts.append(f"**学习目标**：{snapshot['learning_goal']}")
+            if snapshot.get("difficulty"):
+                parts.append(f"**难度**：{snapshot['difficulty']}")
+
+        # 2. 全书精华中的相关项
+        highlights = db.get_global_highlights(self.course_id) or {}
+        key_points = highlights.get("key_points", []) if isinstance(highlights, dict) else []
+        if key_points:
+            parts.append("\n## 全书精华")
+            parts.extend(f"- {kp}" for kp in key_points[:10])
+
+        if not parts:
+            # 兜底：快照缺失时退回原文
+            return self.chapter_info.get("content_slice", "")
+
+        return "\n".join(parts)
 
     async def _share(self) -> AsyncGenerator[str, None]:
         """SHARE状态：AI分享教材片段"""
@@ -211,8 +278,9 @@ class DialogueStateMachine:
             "content": f"请针对这段教材内容提出1个开放性问题，帮助用户深入思考。{weak_prompt}\n{mastery_check}\n只能提1个问题，不要多问。",
         })
 
+        # P2-③: PROBE temperature 从 0.7 降到 0.5，与 EXPLAIN/EVAL 一致
         content_parts = []
-        async for chunk in llm.chat_stream(self.messages, temperature=0.7):
+        async for chunk in llm.chat_stream(self.messages, temperature=0.5):
             content_parts.append(chunk)
             yield chunk
 
@@ -392,14 +460,38 @@ class DialogueStateMachine:
                 yield chunk
 
     def _check_flow_state(self, user_text: str):
-        """心流检测"""
-        if self.current_round >= FLOW_DETECTION["min_rounds"]:
-            if len(user_text) > FLOW_DETECTION["reply_length_threshold"] and \
-               ("?" in user_text or "为什么" in user_text or "如何" in user_text or "是不是" in user_text):
-                self.is_flow_state = True
-                self.flow_extend_count += FLOW_DETECTION["auto_extend_rounds"]
-            else:
-                self.is_flow_state = False
+        """心流检测
+
+        P3-③: 从单条消息判断改为综合判断
+        - 当前消息有信号 → 直接进心流
+        - 或最近 3 条用户消息平均长度 > 80 且问句密度 > 30% → 进心流
+        """
+        if self.current_round < FLOW_DETECTION["min_rounds"]:
+            return
+
+        # 当前消息判断
+        current_signals = (
+            len(user_text) > FLOW_DETECTION["reply_length_threshold"] and
+            any(q in user_text for q in ["?", "为什么", "如何", "是不是"])
+        )
+
+        # 最近 3 条用户消息综合判断
+        recent_user_msgs = [
+            m for m in self.messages[-10:]
+            if m.get("role") == "user"
+        ][-3:]
+        n = max(len(recent_user_msgs), 1)
+        avg_len = sum(len(m.get("content", "")) for m in recent_user_msgs) / n
+        question_density = sum(
+            1 for m in recent_user_msgs
+            if any(q in m.get("content", "") for q in ["?", "为什么", "如何"])
+        ) / n
+
+        if current_signals or (avg_len > 80 and question_density > 0.3):
+            self.is_flow_state = True
+            self.flow_extend_count += FLOW_DETECTION["auto_extend_rounds"]
+        else:
+            self.is_flow_state = False
 
     async def _eval(self, user_text: str) -> dict:
         """EVAL状态：评估用户回答"""
@@ -528,7 +620,19 @@ class DialogueStateMachine:
         """
         检测是否触发反方辩论
         条件：学生连续两次完全认同教师观点
+
+        P2-④ 修复：先做否定词检测，含"不对/但是/我有不同看法"等不算认同
+        之前 bug："对，你说的对，但是我有不同看法" 被误判为认同
         """
+        # 第一步：否定词检测 — 含强否定词时直接不触发辩论
+        negation_keywords = [
+            "不对", "不同意", "但是", "可是", "然而",
+            "我有不同看法", "不是这样的", "我反对", "未必",
+        ]
+        if any(kw in user_text for kw in negation_keywords):
+            return False
+
+        # 第二步：认同词计数
         agreement_keywords = ["是的", "对", "有道理", "没错", "你说得对", "确实", "同意", "明白了"]
         agreement_count = sum(1 for kw in agreement_keywords if kw in user_text)
 
