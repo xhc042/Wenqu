@@ -1,0 +1,181 @@
+#!/usr/bin/env python
+"""
+.harness/hooks/post-commit
+Post-commit hook:触发 verifier-only 检查。
+
+为什么不是 spawn worker:
+    Mavis runtime 的 spawn 通道仅允许 verifier 类型(code-reviewer / tester)。
+    producer 类型(developer / prompt-engineer / db-migrator)不会被 spawn。
+    git hook 是无 session 的匿名脚本,无法可靠 spawn worker。
+    所以本 hook 走务实路线:
+        1. 同步跑 pytest -m "not slow"(等价 tester 触发,更快)
+        2. 打印 code-reviewer 的 review checklist 提醒
+        3. 写入 .harness/.last-commit.json,Mavis 下次会话能读到
+
+安装方法(选其一):
+    a. 软链接(git bash / Linux / macOS):
+        ln -s ../../.harness/hooks/post-commit .git/hooks/post-commit
+    b. 复制:
+        cp .harness/hooks/post-commit .git/hooks/post-commit
+       Windows PowerShell:
+        Copy-Item .harness/hooks/post-commit .git/hooks/post-commit
+
+跳过:
+    git commit -m "msg [skip-hook]"
+
+不阻塞 commit:
+    本 hook 总是 exit 0。测试失败只打印警告。
+"""
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+LOG_FILE = REPO_ROOT / ".harness" / ".last-commit.json"
+
+
+def run(cmd, **kwargs):
+    """git 子命令统一封装"""
+    return subprocess.run(
+        ["git"] + cmd,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        **kwargs,
+    )
+
+
+def get_changed_files():
+    """本次 commit 改动的文件列表"""
+    try:
+        out = run(["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"], check=True).stdout
+        return [f.strip() for f in out.splitlines() if f.strip()]
+    except subprocess.CalledProcessError:
+        return []
+
+
+def get_commit_msg():
+    try:
+        return run(["log", "-1", "--pretty=%B", "HEAD"], check=True).stdout
+    except subprocess.CalledProcessError:
+        return ""
+
+
+def run_tests():
+    """跑非 slow 测试(轻量级,等价 tester 触发的子集)"""
+    print("[hook] running pytest -m 'not slow' ...")
+    try:
+        result = subprocess.run(
+            ["pytest", "tests/", "-m", "not slow", "-q", "--tb=line", "--no-header"],
+            cwd=REPO_ROOT,
+            timeout=120,
+        )
+        if result.returncode == 0:
+            print("[hook] tests passed")
+            return True
+        print(f"[hook] tests FAILED (rc={result.returncode}),详见上方输出")
+        return False
+    except FileNotFoundError:
+        print("[hook] pytest not installed,跳过(请 pip install -r requirements-test.txt)")
+        return None
+    except subprocess.TimeoutExpired:
+        print("[hook] pytest timeout(>120s),跳过")
+        return None
+    except Exception as e:
+        print(f"[hook] pytest error: {e},跳过")
+        return None
+
+
+def print_review_checklist(files):
+    """打印 code-reviewer 的重点 checklist(对应 .harness/reins/code-reviewer/agent.md)"""
+    has_python = any(f.endswith(".py") for f in files)
+    has_prompt = any(f.startswith("prompts/") for f in files)
+    has_schema = "database.py" in files
+    has_static = any(f.startswith("static/") for f in files)
+    has_harness = any(f.startswith(".harness/") or f == "AGENTS.md" for f in files)
+
+    triggered = False
+    if has_python or has_schema:
+        triggered = True
+        print("[hook] code-reviewer checklist(Python / schema 改动):")
+        print("  - 并发安全:async_tasks 跨请求 / SQLite 并发写 / asyncio.create_task GC")
+        print("  - LLM 兜底:每个 llm_client.chat_json 调用是否有 try/except + 降级路径")
+        print("  - 资源管理:aiofiles / db.get_conn() 是否正确 close")
+        print("  - 边界条件:空文本 / 超长文本 / 非 JSON / 章节数 0")
+        print("  - 状态机违规:state_machine 是否绕过 DialogueStateMachine")
+    if has_prompt:
+        triggered = True
+        print("[hook] prompt-engineer checklist(prompt 改动):")
+        print("  - 角色语气一致性:8 角色 × 4 深度 = 32 组合")
+        print("  - 滑块显式体现:strictness / encouragement / verbosity")
+        print("  - 深度档位:deep / dialectical 是否含 critical_angles")
+    if has_static:
+        triggered = True
+        print("[hook] frontend checklist(static/ 改动):")
+        print("  - 内联 JS 是否超过 50 行 / 应抽到 .js 文件")
+        print("  - 是否有 XSS 风险(用户输入渲染)")
+    if has_harness:
+        triggered = True
+        print("[hook] harness checklist(.harness/ 或 AGENTS.md 改动):")
+        print("  - reins 之间是否仍能互相找到(命名一致性)")
+        print("  - 是否承认 producer reins runtime 不可 spawn")
+    if not triggered:
+        print("[hook] 本次改动不触发任何 review checklist(只改了 docs / assets)")
+
+
+def write_log(files, tests_passed):
+    """Mavis 下次会话读取此日志,知道有未 review 的 commit"""
+    try:
+        commit_hash = run(["rev-parse", "HEAD"], check=True).stdout.strip()[:12]
+        log = {
+            "hash": commit_hash,
+            "timestamp": datetime.now().isoformat(),
+            "files_changed": files,
+            "files_count": len(files),
+            "tests_passed": tests_passed,
+            "needs_review": any(
+                f.endswith(".py") or f.startswith("prompts/") or f == "database.py"
+                for f in files
+            ),
+        }
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        LOG_FILE.write_text(
+            json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(f"[hook] log -> {LOG_FILE.relative_to(REPO_ROOT)}")
+    except Exception as e:
+        print(f"[hook] log 写入失败: {e}")
+
+
+def main():
+    msg = get_commit_msg()
+    if "[skip-hook]" in msg:
+        print("[hook] [skip-hook] detected, exit")
+        return 0
+
+    files = get_changed_files()
+    if not files:
+        print("[hook] no files changed, exit")
+        return 0
+
+    print(f"[hook] {len(files)} files changed:")
+    for f in files[:8]:
+        print(f"  - {f}")
+    if len(files) > 8:
+        print(f"  ... and {len(files) - 8} more")
+    print()
+
+    tests_passed = run_tests()
+    print()
+    print_review_checklist(files)
+    print()
+    write_log(files, tests_passed)
+
+    return 0  # 永远不阻塞 commit
+
+
+if __name__ == "__main__":
+    sys.exit(main())

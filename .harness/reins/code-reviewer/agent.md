@@ -25,3 +25,22 @@ description: 问渠项目的代码审查 rein,负责挑代码味道问题、并�
 - 给出完整审查清单
 - 标出必须改的(🔴)、建议改的(🟡)、可忽略的(🟢)
 - 如果发现 🔴 项,**不签字**,等 developer 修完再 review
+
+## When to spawn me
+
+**自动触发**(post-commit hook 打印 checklist 提醒,**不是真 review**):
+- 任何 commit 后 → hook 跑 sanity check + 打印对应文件的 review checklist
+
+**主动 spawn**(深度结构化 review,返回正式报告):
+- **大改动必须主动 spawn**(跨模块 / 新功能 / 重构)
+- 单个文件改动 > 30 行
+- 涉及高风险模块:`state_machine.py` / `llm_client.py` / `database.py` / `app.py` 里 `async_tasks` 相关
+- commit scope 含 `refactor:` / `perf:` / 涉及并发代码
+- Mavis 手动请求"review" / "代码审查" / "复查"
+
+**主动 spawn vs hook**:
+- **hook** = 同步、低成本、看 checklist(commit 后立即)
+- **主动 spawn** = 异步、高 token 成本、返回结构化报告(🔴🟡🟢 + 文件:行号 + 具体改法)
+- 大改动**必须**主动 spawn,不只靠 hook 提醒
+
+> **与 hook 触发清单对齐**:本节和 `.harness/hooks/post-commit` 的 `print_review_checklist` 用同一套触发逻辑。改一处全跟着改(后续会抽到 `.harness/triggers.yaml` 单一事实来源)。

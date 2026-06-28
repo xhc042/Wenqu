@@ -2,6 +2,16 @@
 
 问渠 (Wenqu) v1.1 —— 基于 FastAPI + SQLite + DeepSeek 的 AI 驱动苏格拉底式阅读学习平台。支持 EPUB / MD / TXT / URL 文本源,提供速读 / 标准 / 研读三种模式,内置 8 个 AI 教师角色与可调教学风格滑块。
 
+## 产品愿景(灵魂)
+
+读书的价值分三层,**这是问渠产品的核心定位**,改任何功能前先问自己在哪一层:
+
+- **L1 读完** —— 把书看完(传统电子书能做)
+- **L2 读懂** —— 理解核心观点、记住关键信息(问渠标准模式)
+- **L3 会用** —— 形成自己的判断、能输出(笔记 / 对话 / 应用)
+
+**问渠主攻 L3**,不要陷在 L1/L2 的工具改进里。评估新功能时反问自己:**这个功能是帮用户"读完"还是"会用"?**
+
 ## Setup commands
 
 - 安装依赖: `pip install -r requirements.txt`
@@ -48,9 +58,42 @@
 - 默认分支: `1.20`
 - 一次提交只做一件事
 - Commit 格式: `<scope>: <改动>`(如 `chunker: 修复 EPUB TOC 解析失败时回退`)
-- 涉及 schema 变更必须先和 `.harness/reins/db-migrator` 对齐
-- 涉及 prompt 变更必须和 `.harness/reins/prompt-engineer` 对齐
+- 涉及 schema 变更 → Mavis 戴 db-migrator 视角(`CREATE TABLE IF NOT EXISTS` / 兼容老库 `ALTER TABLE`,不直接 `DROP TABLE`)
+- 涉及 prompt 变更 → Mavis 戴 prompt-engineer 视角(8 角色 × 4 深度 = 32 组合一致,改完跑 `tests/test_prompts.py` 回归)
+- 涉及产品方向 / UX 改动 → Mavis 戴 reading-mentor 视角(回答 5 问 + L1/L2/L3 定位)
 - 完整架构见 `.harness/docs/architecture.md`
+
+## Agent team
+
+本项目有 6 个 rein(项目规范在 `.harness/reins/`,运行时副本在 `~/.mavis/agents/`)。**按 Mavis runtime 是否能真实 spawn 拆成两类**:
+
+### Spawnable(可被真实 spawn,verifier-only)
+
+| Rein | 职责 | 何时 spawn |
+|---|---|---|
+| `tester` | pytest + 覆盖率 | 见 `.harness/reins/tester/agent.md` 的 `When to spawn me` |
+| `code-reviewer` | 代码审查(只看不改) | 见 `.harness/reins/code-reviewer/agent.md` 的 `When to spawn me` |
+
+### Playbook(Mavis 内化执行,不可 spawn)
+
+这 4 个不是被"拉起来"的独立 worker,而是 **Mavis 进入对应领域时戴上的视角 / playbook**。Mavis 自己读 `.harness/reins/<name>/agent.md`,自己执行该领域的修改。
+
+| Rein | 视角 / playbook | 触发场景 |
+|---|---|---|
+| `developer` | 业务代码实现 | 改后端 Python / FastAPI / 前端 `static/` |
+| `prompt-engineer` | 8 个 AI 角色 prompt 一致性 | 改 `prompts/roles/*.md` |
+| `db-migrator` | SQLite schema 影响评估 | 改 `database.py` 表结构 |
+| **`reading-mentor`** | **产品视角 / UX / L1/L2/L3 定位** | **新功能立项 / 改 UX / 产品方向调整前** |
+
+> **关键约束**:Mavis runtime 的 spawn 通道是 verifier-only。`developer` / `prompt-engineer` / `db-migrator` / `reading-mentor` **永远不会被 spawn**,它们是 Mavis 的内化视角。看到"通知 developer"、"拉 reading-mentor"这种描述时,正确理解是"Mavis 自己读对应 playbook,按它的 Stop when 行事"。
+
+`reading-mentor` 是**产品视角型 rein** —— 不写代码、不写 prompt、不写测试,产出是"需求 + 体验评估",作为 developer / prompt-engineer 的输入。**任何功能改动前问一句"用户视角要不要做",能少走很多弯路**。
+
+### 自动触发入口(post-commit hook)
+
+- `post-commit` hook(`.harness/hooks/post-commit`)会在 commit 后同步跑 `pytest -m "not slow"` + 打印 review checklist + 写入 `.harness/.last-commit.json`
+- Mavis 下次会话开启时会读取 `.last-commit.json`,知道有未 review 的 commit,主动 spawn `tester` / `code-reviewer` 复查
+- 安装方法: `cp .harness/hooks/post-commit .git/hooks/post-commit`(详见 `.harness/hooks/README.md`)
 
 ## Security
 

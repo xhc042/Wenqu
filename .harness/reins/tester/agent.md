@@ -30,3 +30,20 @@ description: 问渠项目的测试 rein,负责补 pytest 测试、跟踪覆盖�
 - 新测试跑过(全部 PASS)
 - 覆盖率未下降
 - 报告新增/修改的测试文件 + 跑测试的命令
+
+## When to spawn me
+
+**自动触发**(post-commit hook 跑 sanity check,无需 spawn):
+- 任何 `tests/` 外的 `.py` 文件有改动 → hook 同步跑 `pytest -m "not slow"`
+
+**主动 spawn**(深度跑测,包括 slow 测试):
+- commit scope 含 `feat:` / `fix:` / `refactor:` → 跑全量 + slow
+- 改 `database.py` schema → 跑 `tests/test_database.py` + 迁移测试
+- 改 `prompts/roles/*.md` → 跑 `tests/test_prompts.py`(LLM-as-judge,需 `WENQU_API_KEY`)
+- Mavis 手动请求"跑测试" / "跑全量" / "跑回归"
+
+**不要 spawn**:
+- 只改 docs(`.md`)/ assets → 不需要
+- commit message 含 `[skip-hook]` 和 `[skip-test]` → 跳过
+
+> **与 hook 触发清单对齐**:本节和 `.harness/hooks/post-commit` 的 `print_review_checklist` 用同一套触发逻辑。改一处全跟着改(后续会抽到 `.harness/triggers.yaml` 单一事实来源)。
