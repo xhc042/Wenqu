@@ -82,8 +82,188 @@ function showToast(message, type = '') {
     setTimeout(() => toast.classList.remove('show'), 3000);
 }
 
+// ==================== 全局进度提示系统 ====================
+let currentProgressOverlay = null;
+let currentTaskProgressOverlay = null;
+
+function showProgressOverlay(title, steps) {
+    // 移除已有的进度覆盖层
+    hideProgressOverlay();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'progress-overlay';
+    overlay.className = 'modal-overlay active';
+    overlay.style.zIndex = '3000';
+    overlay.style.backdropFilter = 'blur(4px)';
+
+    overlay.innerHTML = `
+        <div class="modal" style="width:520px;max-width:90vw">
+            <div style="text-align:center;padding:24px 24px 16px">
+                <div style="font-size:48px;margin-bottom:12px;animation:pulse 2s infinite">${getProgressIcon(title)}</div>
+                <h2 style="margin:0 0 8px;font-size:18px;color:var(--text-primary)">${title}</h2>
+                <p id="progress-current-step" style="margin:0 0 20px;font-size:14px;color:var(--text-secondary)">准备中...</p>
+            </div>
+            <div style="padding:0 24px 24px">
+                <div class="progress-bar-outer" style="margin-bottom:20px;height:8px">
+                    <div id="progress-bar-fill" class="progress-bar-inner" style="width:0%;transition:width 0.5s ease"></div>
+                </div>
+                <div id="progress-steps-list" style="max-height:240px;overflow-y:auto">
+                    ${steps.map((s, i) => `
+                        <div class="progress-step" data-step="${i}" style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:8px;margin-bottom:4px;font-size:13px;color:var(--text-secondary)">
+                            <span class="step-icon" style="width:20px;text-align:center;font-size:14px">⏳</span>
+                            <span class="step-text">${s}</span>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(overlay);
+    currentProgressOverlay = overlay;
+
+    // 添加脉冲动画
+    if (!document.getElementById('progress-anim-style')) {
+        const style = document.createElement('style');
+        style.id = 'progress-anim-style';
+        style.textContent = `
+            @keyframes pulse {
+                0%, 100% { transform: scale(1); opacity: 1; }
+                50% { transform: scale(1.1); opacity: 0.8; }
+            }
+            .progress-step.active { background: rgba(108,92,231,0.08); color: var(--text-primary); }
+            .progress-step.done { color: var(--success); }
+            .progress-step.done .step-icon { content: '✅'; }
+        `;
+        document.head.appendChild(style);
+    }
+
+    return {
+        updateStep: (index, status, message) => {
+            const stepEl = overlay.querySelector(`[data-step="${index}"]`);
+            if (!stepEl) return;
+            const iconEl = stepEl.querySelector('.step-icon');
+            const textEl = stepEl.querySelector('.step-text');
+            const currentMsg = document.getElementById('progress-current-step');
+
+            if (status === 'done') {
+                stepEl.className = 'progress-step done';
+                iconEl.textContent = '✅';
+            } else if (status === 'active') {
+                stepEl.className = 'progress-step active';
+                iconEl.textContent = '🔄';
+                if (message) currentMsg.textContent = message;
+            } else if (status === 'error') {
+                stepEl.className = 'progress-step';
+                stepEl.style.color = 'var(--danger)';
+                iconEl.textContent = '❌';
+            }
+            if (message) textEl.textContent = message;
+        },
+        setProgress: (percent) => {
+            const fill = overlay.querySelector('#progress-bar-fill');
+            if (fill) fill.style.width = percent + '%';
+        },
+        setTotalSteps: (total) => {
+            const fill = overlay.querySelector('#progress-bar-fill');
+            if (fill) fill.style.width = (total / steps.length * 100) + '%';
+        },
+    };
+}
+
+function getProgressIcon(title) {
+    if (!title) return '📚';
+    const t = title.toLowerCase();
+    if (t.includes('分章') || t.includes('chapter')) return '📑';
+    if (t.includes('快照') || t.includes('snapshot')) return '🚀';
+    if (t.includes('精华') || t.includes('highlight')) return '✨';
+    if (t.includes('掌握') || t.includes('syllabus')) return '📋';
+    return '⚙️';
+}
+
+function hideProgressOverlay() {
+    if (currentProgressOverlay) {
+        currentProgressOverlay.remove();
+        currentProgressOverlay = null;
+    }
+}
+
+// ==================== 异步任务轮询 ====================
+let currentTaskPollingInterval = null;
+let currentTaskId = null;
+
+function startTaskPolling(taskId) {
+    // 清除之前的轮询
+    if (currentTaskPollingInterval) {
+        clearInterval(currentTaskPollingInterval);
+    }
+    window.currentTaskId = taskId;
+    
+    // 显示进度覆盖层
+    const progressCtrl = showProgressOverlay('正在智能分章...', ['分章处理', '生成教学大纲', '完成']);
+    
+    const poll = async () => {
+        try {
+            const task = await API.get(`/api/tasks/${taskId}`);
+            
+            // 更新进度条
+            progressCtrl.setProgress(task.progress);
+            
+            // 更新步骤状态
+            if (task.steps) {
+                task.steps.forEach((step, index) => {
+                    let status = 'pending';
+                    if (step.status === 'done') status = 'done';
+                    else if (step.status === 'processing' || step.status === 'error') status = 'active';
+                    
+                    const msg = step.detail || step.name;
+                    progressCtrl.updateStep(index, status, msg);
+                });
+            }
+            
+            // 检查任务是否完成或失败
+            if (task.status === 'completed') {
+                clearInterval(currentTaskPollingInterval);
+                currentTaskPollingInterval = null;
+                window.currentTaskId = null;
+                hideProgressOverlay();
+                showToast('✅ 分章和大纲生成完成！', 'success');
+                
+                // 刷新课程数据
+                if (AppState.currentCourseId) {
+                    await openCourse(AppState.currentCourseId);
+                }
+            } else if (task.status === 'failed') {
+                clearInterval(currentTaskPollingInterval);
+                currentTaskPollingInterval = null;
+                window.currentTaskId = null;
+                progressCtrl.updateStep(task.current_step || 0, 'error', task.error || '任务失败');
+                setTimeout(() => {
+                    hideProgressOverlay();
+                    showToast('❌ 分章失败: ' + (task.error || '未知错误'), 'error');
+                }, 1500);
+            }
+        } catch (e) {
+            console.warn('轮询任务状态失败:', e);
+        }
+    };
+    
+    // 立即执行一次，然后每2秒轮询一次
+    poll();
+    currentTaskPollingInterval = setInterval(poll, 2000);
+    
+    return currentTaskPollingInterval;
+}
+
 // ==================== 页面切换 ====================
 function switchView(viewName) {
+    // 切换页面时清理任务轮询
+    if (currentTaskPollingInterval && viewName !== 'course-detail') {
+        clearInterval(currentTaskPollingInterval);
+        currentTaskPollingInterval = null;
+        currentTaskId = null;
+    }
+    
     AppState.currentView = viewName;
     document.querySelectorAll('.page-panel').forEach(p => p.classList.remove('active'));
     const panel = document.getElementById(`page-${viewName}`);
@@ -403,26 +583,19 @@ async function submitCreateCourse() {
         showToast('课程创建成功！', 'success');
         await loadCourseList();
 
-        // 如果有内容，自动分章
-        if (mode !== 'recommendation' && sourcePath) {
-            showToast('正在智能分章...');
-            try {
-                await API.post(`/api/courses/${course.course_id}/chapters/generate`, {});
-                await API.post(`/api/courses/${course.course_id}/syllabus/generate`, {});
-                showToast('分章完成！', 'success');
-            } catch (e) {
-                showToast('分章失败，请稍后重试', 'error');
-            }
-        }
-
-        openCourse(course.course_id);
+        // 如果有内容，后端已自动启动异步分章任务，直接进入课程页面
+        // 前端会通过轮询显示进度
+        console.log('[创建课程] course_id:', course.course_id, 'task_id:', course.task_id);
+        openCourse(course.course_id, course.task_id);
     } catch (e) {
         showToast('创建失败: ' + e.message, 'error');
     }
 }
 
 // ==================== 打开课程 ====================
-async function openCourse(courseId) {
+async function openCourse(courseId, taskId = null) {
+    console.log('[打开课程] courseId:', courseId, 'taskId:', taskId);
+    
     AppState.currentCourseId = courseId;
     switchView('course-detail');
     await loadCourseList();
@@ -435,103 +608,388 @@ async function openCourse(courseId) {
     }
 
     try {
-        // 同时获取课程详情和历史数据
-        const [data, historyData] = await Promise.all([
-            API.get(`/api/courses/${courseId}`),
-            API.get(`/api/courses/${courseId}/history`).catch(() => ({ history: [] }))
-        ]);
-
+        const data = await API.get(`/api/courses/${courseId}`);
         const course = data.course;
         if (!course) { showToast('课程不存在', 'error'); return; }
 
-        // 统计每个章节的学习次数
-        const chapterSessionCounts = {};
-        (historyData.history || []).forEach(s => {
-            const idx = s.chapter_index;
-            chapterSessionCounts[idx] = (chapterSessionCounts[idx] || 0) + 1;
-        });
-
-        // 更新header
-        const sessionCount = data.sessions_count || 0;
-        const stats = data.learning_stats || { total_minutes: 0, total_rounds: 0, total_tokens: 0 };
-        const currentTeacherId = course.current_teacher;
-        const currentTeacherInfo = currentTeacherId && AppState.roles ? AppState.roles[currentTeacherId] : null;
-        const teacherDisplay = currentTeacherInfo
-            ? `${currentTeacherInfo.emoji} ${currentTeacherInfo.name}`
-            : '未设置';
-        const mins = stats.total_minutes || 0;
-        const hrs = Math.floor(mins / 60);
-        const remainMins = mins % 60;
-        const timeStr = hrs > 0 ? `${hrs}小时${remainMins}分钟` : `${remainMins}分钟`;
-        const tokensStr = stats.total_tokens >= 1000
-            ? (stats.total_tokens / 1000).toFixed(1) + 'k'
-            : stats.total_tokens.toString();
-        document.getElementById('course-header').innerHTML = `
-            <div class="course-detail-header">
-                <div>
-                    <div class="course-title">${course.title}</div>
-                    <div class="course-source">${course.source_type} · ${new Date(course.created_at).toLocaleDateString()}
-                        · <span style="color:var(--accent);font-weight:500">已学习 ${sessionCount} 次</span>
-                    </div>
-                    <div style="display:flex;gap:16px;margin-top:8px;font-size:13px;color:var(--text-secondary)">
-                        <span>🧑‍🏫 教师：<strong>${teacherDisplay}</strong></span>
-                        <span>⏱ 时长：<strong>${timeStr}</strong></span>
-                        <span>🔤 Token：<strong>${tokensStr}</strong></span>
-                    </div>
-                </div>
-                <div style="display:flex;gap:8px">
-                    <button class="btn btn-outline btn-sm" onclick="showCourseOverview()">📊 全书总览</button>
-                    ${course.reading_mode === 'speed' ? '<button class="btn btn-outline btn-sm" onclick="showSnapshotsModal()">🚀 知识快照</button>' : ''}
-                    ${course.reading_mode === 'deep' ? '<button class="btn btn-outline btn-sm" onclick="showSpiritualNotesModal()">🧠 思辨笔记</button>' : ''}
-                    <button class="btn btn-outline btn-sm" onclick="showContractModal()">📋 学习契约</button>
-                    <button class="btn btn-outline btn-sm" onclick="showSlidersModal()">🎛️ 风格调控</button>
-                    <button class="btn btn-outline btn-sm" onclick="switchView('model-config');loadModelConfig()">🔧 模型配置</button>
-                    <button class="btn btn-outline btn-sm" onclick="showAllSyllabusModal()">📋 全书知识点</button>
-                    <button class="btn btn-danger btn-sm" onclick="deleteCurrentCourse()">🗑️</button>
-                </div>
-            </div>
-        `;
-
-        // 进度条
-        const progress = data.progress || { total: 0, mastered: 0, percent: 0 };
-        document.getElementById('course-progress').innerHTML = `
-            <div class="progress-bar-container">
-                <div style="display:flex;justify-content:space-between;margin-bottom:8px">
-                    <span style="font-weight:500">课程进度</span>
-                    <span>${progress.mastered}/${progress.total} 项已掌握 (${progress.percent}%)</span>
-                </div>
-                <div class="progress-bar-outer">
-                    <div class="progress-bar-inner" style="width:${progress.percent}%"></div>
-                </div>
-            </div>
-        `;
-
-        // 结业答辩按钮
-        const defenseBanner = document.getElementById('defense-banner');
-        if (progress.total > 0 && progress.percent === 100) {
-            defenseBanner.classList.add('show');
-            defenseBanner.innerHTML = `<h2>🎓 恭喜！所有掌握项已完成</h2>
-                <p>准备好接受结业答辩了吗？</p>
-                <button class="btn btn-primary" onclick="startDefense()" style="margin-top:12px">🎓 申请结业答辩</button>`;
+        // 立即渲染课程UI，不让用户等待
+        renderCourseUI(course, data);
+        
+        // 优先使用传入的 taskId，否则检查是否有活跃任务
+        const activeTaskId = taskId || data.active_task?.task_id;
+        
+        // 如果有异步任务，启动后台轮询更新进度（不阻塞页面）
+        if (activeTaskId) {
+            console.log('[启动后台轮询] taskId:', activeTaskId, 'courseId:', courseId);
+            startBackgroundTaskPolling(activeTaskId, courseId);
         } else {
-            defenseBanner.classList.remove('show');
+            console.log('[无异步任务] 直接显示课程');
         }
-
-        // 章节列表（传入章节学习次数用于显示历史按钮）
-        renderChapters(data.chapters || [], data.syllabus || [], chapterSessionCounts, data.reading_mode);
-
-        // 课后产出物
-        renderPostClass(data);
-
-        // 证书
-        renderCertificates(data.certificates || []);
-
-        // 推荐角色
-        loadRoleRecommendation(courseId);
+        
+        // 历史数据异步加载，不阻塞页面显示
+        API.get(`/api/courses/${courseId}/history`).then(historyData => {
+            updateCourseHistory(historyData);
+        }).catch(() => {});
 
     } catch (e) {
         showToast('加载课程失败', 'error');
     }
+}
+
+// 后台轮询任务进度，不阻塞页面
+function startBackgroundTaskPolling(taskId, courseId) {
+    let pollCount = 0;
+    const maxPolls = 300; // 最多轮询10分钟（2秒*300）
+    
+    // 显示非阻塞状态提示（顶部小条幅）
+    showNonBlockingProgress();
+    
+    const poll = async () => {
+        if (pollCount >= maxPolls) {
+            hideNonBlockingProgress();
+            return;
+        }
+        
+        try {
+            const task = await API.get(`/api/tasks/${taskId}`);
+            
+            if (task.status === 'completed') {
+                hideNonBlockingProgress();
+                showToast('✅ 分章和大纲生成完成！', 'success');
+                
+                // 刷新课程数据
+                const data = await API.get(`/api/courses/${courseId}`);
+                renderCourseUI(data.course, data);
+                return;
+            } else if (task.status === 'failed') {
+                hideNonBlockingProgress();
+                showToast('⚠️ 分章失败: ' + (task.error || '未知错误'), 'error');
+                // 分章失败后允许重试
+                showRetryButton(courseId);
+                return;
+            }
+            
+            // 更新非阻塞进度显示
+            updateNonBlockingProgress(task);
+            pollCount++;
+            setTimeout(poll, 2000);
+        } catch (e) {
+            console.warn('轮询任务状态失败:', e);
+            pollCount++;
+            setTimeout(poll, 2000);
+        }
+    };
+    
+    poll();
+}
+
+// 显示非阻塞式进度条（顶部小条幅，不遮挡用户操作）
+function showNonBlockingProgress() {
+    // 如果已存在，先移除
+    hideNonBlockingProgress();
+    
+    const progressBar = document.createElement('div');
+    progressBar.id = 'non-blocking-progress';
+    progressBar.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 3px;
+        background: var(--border);
+        z-index: 9999;
+        overflow: hidden;
+    `;
+    progressBar.innerHTML = `
+        <div id="non-blocking-progress-fill" style="
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, var(--accent), var(--success));
+            transition: width 0.5s ease;
+        "></div>
+    `;
+    document.body.appendChild(progressBar);
+    
+    // 顶部状态提示
+    const statusBar = document.createElement('div');
+    statusBar.id = 'non-blocking-status';
+    statusBar.style.cssText = `
+        position: fixed;
+        top: 3px;
+        right: 16px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 20px;
+        padding: 4px 12px;
+        font-size: 12px;
+        color: var(--text-secondary);
+        z-index: 10000;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    `;
+    statusBar.innerHTML = `<span>📚</span><span id="non-blocking-status-text">正在智能分章...</span>`;
+    document.body.appendChild(statusBar);
+}
+
+// 更新非阻塞进度条
+function updateNonBlockingProgress(task) {
+    const fill = document.getElementById('non-blocking-progress-fill');
+    const statusText = document.getElementById('non-blocking-status-text');
+    
+    if (fill) {
+        fill.style.width = (task.progress || 0) + '%';
+    }
+    
+    if (statusText && task.steps && task.steps[task.current_step || 0]) {
+        const currentStep = task.steps[task.current_step || 0];
+        statusText.textContent = currentStep.detail || currentStep.name || '处理中...';
+    }
+}
+
+// 隐藏非阻塞进度条
+function hideNonBlockingProgress() {
+    const progressBar = document.getElementById('non-blocking-progress');
+    const statusBar = document.getElementById('non-blocking-status');
+    if (progressBar) progressBar.remove();
+    if (statusBar) statusBar.remove();
+}
+
+// 显示重试按钮
+function showRetryButton(courseId) {
+    const chapterList = document.getElementById('chapter-list');
+    if (chapterList) {
+        chapterList.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-icon">😔</div>
+                <h3>分章失败</h3>
+                <p>请稍后重试</p>
+                <button class="btn btn-primary" onclick="retryChapterGeneration('${courseId}')" style="margin-top:16px">
+                    🔄 重新分章
+                </button>
+            </div>
+        `;
+    }
+}
+
+// 重新分章
+async function retryChapterGeneration(courseId) {
+    try {
+        const result = await API.post('/api/tasks/chapters-generate', { course_id: courseId });
+        if (result.task_id) {
+            showToast('正在重新分章...', 'info');
+            startBackgroundTaskPolling(result.task_id, courseId);
+        }
+    } catch (e) {
+        showToast('重试失败: ' + e.message, 'error');
+    }
+}
+
+// 显示任务进度覆盖层
+function showTaskProgressOverlay(task) {
+    // 如果覆盖层已存在，只更新内容
+    if (currentTaskProgressOverlay) {
+        updateTaskProgressOverlay(task);
+        return;
+    }
+    
+    const overlay = document.createElement('div');
+    overlay.id = 'task-progress-overlay';
+    overlay.className = 'modal-overlay active';
+    overlay.style.zIndex = '3000';
+    overlay.style.backdropFilter = 'blur(4px)';
+    
+    const stepsHtml = (task.steps || []).map((step, i) => {
+        let icon = '⏳';
+        let className = 'progress-step';
+        if (step.status === 'done') { icon = '✅'; className += ' done'; }
+        else if (step.status === 'processing' || step.status === 'error') { icon = '🔄'; className += ' active'; }
+        if (step.status === 'error') className += ' error';
+        
+        return `<div class="${className}" data-step="${i}" style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:8px;margin-bottom:4px;font-size:13px;color:var(--text-secondary)">
+            <span class="step-icon" style="width:20px;text-align:center;font-size:14px">${icon}</span>
+            <span class="step-text">${step.name}${step.detail ? ' - ' + step.detail : ''}</span>
+        </div>`;
+    }).join('');
+    
+    overlay.innerHTML = `
+        <div class="modal" style="width:520px;max-width:90vw">
+            <div style="text-align:center;padding:24px 24px 16px">
+                <div style="font-size:48px;margin-bottom:12px;animation:pulse 2s infinite">📚</div>
+                <h2 style="margin:0 0 8px;font-size:18px;color:var(--text-primary)">正在处理课程...</h2>
+                <p style="margin:0 0 20px;font-size:14px;color:var(--text-secondary)">${task.steps ? task.steps[task.current_step || 0]?.detail || '准备中...' : '准备中...'}</p>
+            </div>
+            <div style="padding:0 24px 24px">
+                <div class="progress-bar-outer" style="margin-bottom:20px;height:8px">
+                    <div class="progress-bar-inner" style="width:${task.progress || 0}%;transition:width 0.5s ease"></div>
+                </div>
+                <div style="max-height:240px;overflow-y:auto">
+                    ${stepsHtml}
+                </div>
+            </div>
+        </div>
+    `;
+    
+    document.body.appendChild(overlay);
+    currentTaskProgressOverlay = overlay;
+    
+    // 添加脉冲动画
+    if (!document.getElementById('task-progress-anim-style')) {
+        const style = document.createElement('style');
+        style.id = 'task-progress-anim-style';
+        style.textContent = `
+            @keyframes pulse {
+                0%, 100% { transform: scale(1); opacity: 1; }
+                50% { transform: scale(1.1); opacity: 0.8; }
+            }
+            .progress-step.active { background: rgba(108,92,231,0.08); color: var(--text-primary); }
+            .progress-step.done { color: var(--success); }
+            .progress-step.error { color: var(--danger); }
+        `;
+        document.head.appendChild(style);
+    }
+}
+
+function updateTaskProgressOverlay(task) {
+    if (!currentTaskProgressOverlay) return;
+    
+    // 更新进度条
+    const fill = currentTaskProgressOverlay.querySelector('.progress-bar-inner');
+    if (fill) fill.style.width = (task.progress || 0) + '%';
+    
+    // 更新当前提示文字
+    const currentMsg = currentTaskProgressOverlay.querySelector('p[style*="margin:0 0 20px"]');
+    if (currentMsg && task.steps && task.steps[task.current_step || 0]) {
+        currentMsg.textContent = task.steps[task.current_step || 0].detail || '处理中...';
+    }
+    
+    // 更新步骤状态
+    (task.steps || []).forEach((step, i) => {
+        const stepEl = currentTaskProgressOverlay.querySelector(`[data-step="${i}"]`);
+        if (!stepEl) return;
+        
+        let icon = '⏳';
+        let className = 'progress-step';
+        if (step.status === 'done') { icon = '✅'; className += ' done'; }
+        else if (step.status === 'processing' || step.status === 'error') { icon = '🔄'; className += ' active'; }
+        if (step.status === 'error') className += ' error';
+        
+        stepEl.className = className;
+        stepEl.querySelector('.step-icon').textContent = icon;
+        const textEl = stepEl.querySelector('.step-text');
+        if (textEl) {
+            textEl.textContent = step.name + (step.detail ? ' - ' + step.detail : '');
+        }
+    });
+}
+
+function hideTaskProgressOverlay() {
+    if (currentTaskProgressOverlay) {
+        currentTaskProgressOverlay.remove();
+        currentTaskProgressOverlay = null;
+    }
+}
+
+// 渲染课程UI
+function renderCourseUI(course, data) {
+    const sessionCount = data.sessions_count || 0;
+    const stats = data.learning_stats || { total_minutes: 0, total_rounds: 0, total_tokens: 0 };
+    const currentTeacherId = course.current_teacher;
+    const currentTeacherInfo = currentTeacherId && AppState.roles ? AppState.roles[currentTeacherId] : null;
+    const teacherDisplay = currentTeacherInfo
+        ? `${currentTeacherInfo.emoji} ${currentTeacherInfo.name}`
+        : '未设置';
+    const mins = stats.total_minutes || 0;
+    const hrs = Math.floor(mins / 60);
+    const remainMins = mins % 60;
+    const timeStr = hrs > 0 ? `${hrs}小时${remainMins}分钟` : `${remainMins}分钟`;
+    const tokensStr = stats.total_tokens >= 1000
+        ? (stats.total_tokens / 1000).toFixed(1) + 'k'
+        : stats.total_tokens.toString();
+    
+    document.getElementById('course-header').innerHTML = `
+        <div class="course-detail-header">
+            <div>
+                <div class="course-title">${course.title}</div>
+                <div class="course-source">${course.source_type} · ${new Date(course.created_at).toLocaleDateString()}
+                    · <span style="color:var(--accent);font-weight:500">已学习 ${sessionCount} 次</span>
+                </div>
+                <div style="display:flex;gap:16px;margin-top:8px;font-size:13px;color:var(--text-secondary)">
+                    <span>🧑‍🏫 教师：<strong>${teacherDisplay}</strong></span>
+                    <span>⏱ 时长：<strong>${timeStr}</strong></span>
+                    <span>🔤 Token：<strong>${tokensStr}</strong></span>
+                </div>
+            </div>
+            <div style="display:flex;gap:8px">
+                <button class="btn btn-outline btn-sm" onclick="showCourseOverview()">📊 全书总览</button>
+                ${course.reading_mode === 'speed' ? '<button class="btn btn-outline btn-sm" onclick="showSnapshotsModal()">🚀 知识快照</button>' : ''}
+                ${course.reading_mode === 'deep' ? '<button class="btn btn-outline btn-sm" onclick="showSpiritualNotesModal()">🧠 思辨笔记</button>' : ''}
+                <button class="btn btn-outline btn-sm" onclick="showContractModal()">📋 学习契约</button>
+                <button class="btn btn-outline btn-sm" onclick="showSlidersModal()">🎛️ 风格调控</button>
+                <button class="btn btn-outline btn-sm" onclick="switchView('model-config');loadModelConfig()">🔧 模型配置</button>
+                <button class="btn btn-outline btn-sm" onclick="showAllSyllabusModal()">📋 全书知识点</button>
+                <button class="btn btn-danger btn-sm" onclick="deleteCurrentCourse()">🗑️</button>
+            </div>
+        </div>
+    `;
+    
+    // 进度条
+    const progress = data.progress || { total: 0, mastered: 0, percent: 0 };
+    document.getElementById('course-progress').innerHTML = `
+        <div class="progress-bar-container">
+            <div style="display:flex;justify-content:space-between;margin-bottom:8px">
+                <span style="font-weight:500">课程进度</span>
+                <span>${progress.mastered}/${progress.total} 项已掌握 (${progress.percent}%)</span>
+            </div>
+            <div class="progress-bar-outer">
+                <div class="progress-bar-inner" style="width:${progress.percent}%"></div>
+            </div>
+        </div>
+    `;
+    
+    // 结业答辩按钮
+    const defenseBanner = document.getElementById('defense-banner');
+    if (progress.total > 0 && progress.percent === 100) {
+        defenseBanner.classList.add('show');
+        defenseBanner.innerHTML = `<h2>🎓 恭喜！所有掌握项已完成</h2>
+            <p>准备好接受结业答辩了吗？</p>
+            <button class="btn btn-primary" onclick="startDefense()" style="margin-top:12px">🎓 申请结业答辩</button>`;
+    } else {
+        defenseBanner.classList.remove('show');
+    }
+    
+    // 章节列表
+    renderChapters(data.chapters || [], data.syllabus || [], {}, data.reading_mode);
+    
+    // 课后产出物
+    renderPostClass(data);
+    
+    // 证书
+    renderCertificates(data.certificates || []);
+    
+    // 推荐角色
+    loadRoleRecommendation(course.id);
+}
+
+// 更新课程历史数据
+function updateCourseHistory(historyData) {
+    if (!historyData || !historyData.history) return;
+    
+    const courseId = AppState.currentCourseId;
+    if (!courseId) return;
+    
+    // 统计每个章节的学习次数
+    const chapterSessionCounts = {};
+    historyData.history.forEach(s => {
+        const idx = s.chapter_index;
+        chapterSessionCounts[idx] = (chapterSessionCounts[idx] || 0) + 1;
+    });
+    
+    // 重新渲染章节列表，带上学习次数
+    API.get(`/api/courses/${courseId}`).then(data => {
+        renderChapters(data.chapters || [], data.syllabus || [], chapterSessionCounts, data.reading_mode);
+    }).catch(() => {});
 }
 
 function renderChapters(chapters, syllabus, chapterSessionCounts = {}, readingMode = null) {
@@ -539,7 +997,34 @@ function renderChapters(chapters, syllabus, chapterSessionCounts = {}, readingMo
     list.innerHTML = '';
 
     if (chapters.length === 0) {
-        list.innerHTML = '<div class="empty-state"><div class="empty-icon">📖</div><h3>暂无章节</h3><p>请先完成分章处理</p></div>';
+        list.innerHTML = `
+            <div class="chapter-loading-state" style="
+                background: linear-gradient(135deg, rgba(108,92,231,0.05) 0%, rgba(0,0,0,0) 100%);
+                border: 1px dashed var(--border);
+                border-radius: 12px;
+                padding: 40px;
+                text-align: center;
+                margin: 16px 0;
+            ">
+                <div style="font-size: 48px; margin-bottom: 16px; animation: pulse 2s infinite">📚</div>
+                <h3 style="margin: 0 0 8px; color: var(--text-primary)">正在智能分章...</h3>
+                <p style="margin: 0; color: var(--text-secondary); font-size: 14px">
+                    系统正在分析文本结构，生成章节大纲<br>
+                    <span style="font-size: 12px; color: var(--text-tertiary)">不用担心，你可以先看看课程简介，稍等片刻即可</span>
+                </p>
+                <div style="margin-top: 16px">
+                    <div style="width: 200px; height: 4px; background: var(--border); border-radius: 2px; margin: 0 auto; overflow: hidden;">
+                        <div style="width: 30%; height: 100%; background: var(--accent); border-radius: 2px; animation: loading 1.5s ease-in-out infinite;"></div>
+                    </div>
+                </div>
+                <style>
+                    @keyframes loading {
+                        0% { transform: translateX(-100%); }
+                        100% { transform: translateX(400%); }
+                    }
+                </style>
+            </div>
+        `;
         return;
     }
 
@@ -568,15 +1053,31 @@ function renderChapters(chapters, syllabus, chapterSessionCounts = {}, readingMo
 
             const sessionCount = chapterSessionCounts[ch.idx] || 0;
 
-            // 速读模式：简洁展示
+            // 速读模式：简洁展示，包含快照信息
             if (isSpeedMode) {
+                // 构建核心信息标签
+                const coreTags = [];
+                if (ch.is_core) coreTags.push('<span class="tag tag-core" style="font-size:11px;background:rgba(255,107,107,0.15);color:#ff6b6b;border:none">⭐ 核心</span>');
+                if (ch.importance && ch.importance > 0.7) coreTags.push('<span class="tag" style="font-size:11px;background:rgba(255,193,7,0.15);color:#ffc107;border:none">🔥 重要</span>');
+                
+                const snapshotInfo = [];
+                if (ch.learning_goal) snapshotInfo.push(`<span style="font-size:12px;color:#636e72">🎯 ${escapeHtml(ch.learning_goal)}</span>`);
+                if (ch.core_viewpoint) snapshotInfo.push(`<span style="font-size:12px;color:#636e72">💡 ${escapeHtml(ch.core_viewpoint)}</span>`);
+                
+                const keywordsHtml = (ch.keywords && ch.keywords.length > 0) 
+                    ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px">${ch.keywords.map(k => `<span style="font-size:11px;padding:2px 8px;background:rgba(108,92,231,0.1);color:var(--accent);border-radius:10px">${escapeHtml(k)}</span>`).join('')}</div>`
+                    : '';
+
                 div.innerHTML = `
                     <div class="chapter-index">${levelIcon}</div>
                     <div class="chapter-info">
                         <div class="chapter-title" style="font-weight:${depth <= 1 ? '600' : '400'}">
                             ${ch.title}
+                            ${coreTags.join('')}
                         </div>
-                        <div class="chapter-items-count" style="color:#636e72;font-size:12px">
+                        ${snapshotInfo.length > 0 ? `<div style="margin-top:4px">${snapshotInfo.join('<br>')}</div>` : ''}
+                        ${keywordsHtml}
+                        <div class="chapter-items-count" style="color:#636e72;font-size:12px;margin-top:4px">
                             ${sessionCount > 0 ? `<span style="color:var(--success)">✅ 已学习 ${sessionCount} 次</span>` : '<span>💡 快速浏览即可</span>'}
                         </div>
                     </div>
@@ -898,6 +1399,20 @@ async function startChat(chapterIndex) {
         courseData = await API.get(`/api/courses/${courseId}`);
         const chapters = courseData.chapters || [];
         const chapter = chapters.find(c => c.idx === chapterIndex);
+
+        // 如果章节不存在（还在分章中），提示用户等待
+        if (!chapter) {
+            showToast('📚 章节正在生成分章中，请稍候...', 'info');
+            
+            // 如果有后台任务在运行，显示进度
+            if (window.currentTaskId) {
+                const task = await API.get(`/api/tasks/${window.currentTaskId}`).catch(() => null);
+                if (task && task.status === 'processing') {
+                    showToast(`⏳ ${task.steps?.[task.current_step || 0]?.detail || '分章中...'}`, 'info');
+                }
+            }
+            return;
+        }
 
         // 更新对话页顶部章节名称
         document.getElementById('chat-chapter-name').textContent = chapter?.title || chapterTitle;
@@ -2677,7 +3192,7 @@ function showAllSyllabusModal() {
     var container = document.createElement('div');
     container.className = 'modal';
     container.onclick = function(e) { e.stopPropagation(); };
-    container.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px"><h2>📋 全书知识点</h2><button class="btn btn-outline btn-sm" onclick="this.closest(\'.modal-overlay\').remove()">✕</button></div><div id="syllabus-list-modal" style="max-height:60vh;overflow-y:auto;padding-right:8px"></div>';
+    container.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px"><h2>📋 全书知识点</h2><div style="display:flex;gap:8px"><button class="btn btn-outline btn-sm" id="syllabus-refresh-btn" onclick="refreshSyllabusData()">🔄 刷新知识点</button><button class="btn btn-outline btn-sm" onclick="this.closest(\'.modal-overlay\').remove()">✕</button></div></div><div id="syllabus-list-modal" style="max-height:60vh;overflow-y:auto;padding-right:8px"></div>';
     modal.appendChild(container);
     document.body.appendChild(modal);
     loadAllSyllabusData();
@@ -2716,6 +3231,25 @@ async function loadAllSyllabusData() {
             };
         });
     } catch (e) { console.error('加载知识点失败', e); showToast('加载知识点失败', 'error'); }
+}
+
+async function refreshSyllabusData() {
+    if (!AppState.currentCourseId) return;
+    const btn = document.getElementById('syllabus-refresh-btn');
+    if (!btn) return;
+    btn.disabled = true;
+    btn.textContent = '⏳ 生成中...';
+    try {
+        await API.post(`/api/courses/${AppState.currentCourseId}/syllabus/regenerate`, {});
+        showToast('知识点已刷新', 'success');
+        await loadAllSyllabusData();
+    } catch (e) {
+        console.error('刷新知识点失败', e);
+        showToast('刷新失败: ' + (e.message || '未知错误'), 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '🔄 刷新知识点';
+    }
 }
 
 function viewSyllabusDetail(syllabusId, description) {
@@ -2878,27 +3412,38 @@ function renderSnapshotsModal(snapshots, highlights) {
                 ${highlights.chapter_priorities && highlights.chapter_priorities.length > 0 ? `
                     <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
                         <h4 style="font-size:14px;margin-bottom:8px">📚 推荐学习顺序</h4>
-                        <ol style="padding-left:20px">${highlights.chapter_priorities.map(p => `<li style="margin-bottom:4px">${escapeHtml(p)}</li>`).join('')}</ol>
+                        <ol style="padding-left:20px">${highlights.chapter_priorities.map(p => `<li style="margin-bottom:4px;font-size:13px">${escapeHtml(p)}</li>`).join('')}</ol>
                     </div>
                 ` : ''}
             </div>
         `;
     }
 
-    // 章节快照
-    html += '<h3 style="margin-bottom:12px">📑 各章知识快照</h3>';
-    html += '<div style="display:flex;flex-direction:column;gap:12px">';
-    html += snapshots.map(s => `
-        <div style="background:var(--bg-secondary);border-radius:12px;padding:16px;box-shadow:0 2px 8px rgba(0,0,0,0.05)">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-                <span style="font-weight:600;color:var(--accent)">第${s.chapter_index + 1}章</span>
-                ${s.core_viewpoint ? `<span style="font-size:13px;color:var(--text-secondary);flex:1;text-align:right;margin-left:12px">${escapeHtml(s.core_viewpoint)}</span>` : ''}
+    // 章节快照（按学习顺序排序）
+    html += '<h3 style="margin-bottom:12px;font-size:15px">📑 各章知识快照</h3>';
+    html += '<div style="display:flex;flex-direction:column;gap:10px">';
+    
+    // 按重要性排序
+    const sortedSnapshots = [...snapshots].sort((a, b) => (b.importance || 0) - (a.importance || 0));
+    
+    html += sortedSnapshots.map((s, idx) => {
+        const isCore = s.importance > 0.7;
+        return `
+        <div style="background:var(--bg-secondary);border-radius:12px;padding:14px 16px;box-shadow:0 2px 8px rgba(0,0,0,0.05);${isCore ? 'border-left:3px solid var(--danger);' : ''}">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                <div style="display:flex;align-items:center;gap:8px">
+                    <span style="font-weight:600;color:var(--accent)">${escapeHtml(s.chapter_title || `第${s.chapter_index + 1}章`)}</span>
+                    ${isCore ? '<span style="font-size:10px;padding:2px 6px;background:rgba(255,107,107,0.15);color:#ff6b6b;border-radius:4px;font-weight:600">⭐ 核心</span>' : ''}
+                    <span style="font-size:11px;color:var(--text-secondary)">重要性: ${(s.importance || 0).toFixed(1)}</span>
+                </div>
             </div>
-            <div style="display:flex;flex-wrap:wrap;gap:6px">
-                ${(s.keywords || []).map(k => `<span style="font-size:12px;padding:4px 10px;background:rgba(108,92,231,0.1);color:var(--accent);border-radius:12px">${escapeHtml(k)}</span>`).join('')}
+            ${s.learning_goal ? `<div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px">🎯 学习目标：${escapeHtml(s.learning_goal)}</div>` : ''}
+            ${s.core_viewpoint ? `<div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px">💡 核心观点：${escapeHtml(s.core_viewpoint)}</div>` : ''}
+            <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px">
+                ${(s.keywords || []).map(k => `<span style="font-size:11px;padding:3px 8px;background:rgba(108,92,231,0.1);color:var(--accent);border-radius:10px">${escapeHtml(k)}</span>`).join('')}
             </div>
         </div>
-    `).join('');
+    `}).join('');
     html += '</div>';
 
     container.innerHTML = html;
@@ -2926,158 +3471,122 @@ function renderCourseOverviewModal(overview) {
 
     // 速读模式显示快照数量，其他模式显示知识点数量
     const isSpeedMode = overview.reading_mode === 'speed';
-    const totalLabel = isSpeedMode ? '快照数' : '知识点';
+    const totalLabel = isSpeedMode ? '快照' : '知识点';
     const totalCount = coverage.total_points || 0;
     const masteredCount = coverage.mastered_points || 0;
 
-    let html = `
-        <div class="overview-strategy">
-            <span class="strategy-badge">${escapeHtml(overview.strategy_description || '')}</span>
-        </div>
+    let html = '';
 
-        <div class="overview-coverage">
-            <div class="coverage-circle">
-                <svg viewBox="0 0 100 100">
-                    <circle cx="50" cy="50" r="45" fill="none" stroke="#dfe6e9" stroke-width="8"/>
-                    <circle cx="50" cy="50" r="45" fill="none"
-                            stroke="var(--accent)" stroke-width="8"
-                            stroke-dasharray="${circumference}"
-                            stroke-dashoffset="${offset}"
-                            transform="rotate(-90 50 50)"/>
-                </svg>
-                <span class="coverage-number">${percent}%</span>
+    // === 第一部分：核心概览卡片（聚焦最重要信息）===
+    html += `
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px">
+            <div style="background:linear-gradient(135deg,rgba(108,92,231,0.1),rgba(108,92,231,0.05));border-radius:12px;padding:20px;text-align:center">
+                <div style="font-size:36px;font-weight:700;color:var(--accent)">${percent}%</div>
+                <div style="font-size:13px;color:var(--text-secondary);margin-top:4px">${isSpeedMode ? '知识覆盖率' : '掌握率'}</div>
+                <div style="font-size:12px;color:var(--text-secondary);margin-top:2px">${masteredCount}/${totalCount} ${totalLabel}</div>
             </div>
-            <p>${isSpeedMode ? '已生成' : '已掌握'} ${masteredCount}/${totalCount} 个${totalLabel}</p>
-            ${coverage.total_chapters ? `<p style="font-size:12px;color:var(--text-secondary)">全书共 ${coverage.total_chapters} 章</p>` : ''}
+            <div style="background:linear-gradient(135deg,rgba(0,184,148,0.1),rgba(0,184,148,0.05));border-radius:12px;padding:20px;text-align:center">
+                <div style="font-size:36px;font-weight:700;color:var(--success)">${coverage.total_chapters || overview.chapter_stats?.length || 0}</div>
+                <div style="font-size:13px;color:var(--text-secondary);margin-top:4px">总章节</div>
+                <div style="font-size:12px;color:var(--text-secondary);margin-top:2px">全书共 ${coverage.total_chapters || overview.chapter_stats?.length || 0} 章</div>
+            </div>
         </div>
-
-        <div class="overview-chapters">
-            <h3 style="margin:16px 0 12px;font-size:15px">章节掌握情况</h3>
     `;
 
-    (overview.chapter_stats || []).forEach(ch => {
-        const chPercent = ch.total > 0 ? Math.round(ch.mastered / ch.total * 100) : 0;
+    // === 第二部分：全书核心知识点（最重要，置顶显示）===
+    if (isSpeedMode && overview.highlights && overview.highlights.key_points && overview.highlights.key_points.length > 0) {
+        const h = overview.highlights;
         html += `
-            <div class="chapter-stat-row">
-                <span class="chapter-name">${escapeHtml(ch.title || `第${ch.idx + 1}章`)}</span>
-                <div class="progress-bar-mini">
-                    <div class="progress-bar-mini-fill" style="width:${chPercent}%"></div>
+            <div style="margin-bottom:20px;padding:16px;background:linear-gradient(135deg, rgba(108,92,231,0.08), rgba(6,214,160,0.08));border-radius:12px;border:1px solid rgba(108,92,231,0.2)">
+                <h3 style="margin:0 0 12px;font-size:15px;color:var(--accent)">🔥 全书核心知识点</h3>
+                <div style="display:flex;flex-direction:column;gap:6px">
+                    ${h.key_points.slice(0, 8).map((point, i) => `
+                        <div style="display:flex;align-items:flex-start;gap:8px;padding:8px 12px;background:white;border-radius:8px">
+                            <span style="font-size:11px;padding:2px 8px;border-radius:4px;font-weight:600;white-space:nowrap;background:${i < 3 ? 'rgba(255,107,107,0.15)' : 'rgba(108,92,231,0.1)'};color:${i < 3 ? '#ff6b6b' : 'var(--accent)'}">${i < 3 ? '🔥 核心' : '📌 重要'}</span>
+                            <span style="font-size:13px;line-height:1.5">${escapeHtml(point)}</span>
+                        </div>
+                    `).join('')}
                 </div>
-                <span class="chapter-count">${ch.mastered}/${ch.total}</span>
             </div>
         `;
-    });
-
-    html += '</div>';
-
-    if (overview.weak_areas && overview.weak_areas.length > 0) {
-        html += `
-            <div class="overview-weak">
-                <h3 style="margin:16px 0 8px;font-size:14px;color:var(--warning)">${isSpeedMode ? '⚠️ 未学习章节' : '⚠️ 薄弱环节'}</h3>
-        `;
-        overview.weak_areas.forEach(w => {
-            html += `<div class="weak-item">${escapeHtml(w.description)} <span class="weak-tag">${w.status || ''}</span></div>`;
-        });
-        html += '</div>';
     }
 
-    // 智能学习顺序推荐（速读模式：三级推荐；其他模式：简单列表）
-    if (overview.recommended_order) {
-        if (isSpeedMode && typeof overview.recommended_order === 'object' && !Array.isArray(overview.recommended_order)) {
-            // 速读模式：三级推荐（已学/核心待学/可选）
-            const order = overview.recommended_order;
+    // === 第三部分：智能学习路径（速读模式专用）===
+    if (isSpeedMode && overview.recommended_order && typeof overview.recommended_order === 'object' && !Array.isArray(overview.recommended_order)) {
+        const order = overview.recommended_order;
+        
+        // 下一步推荐（最醒目）
+        const nextCh = order.next_chapter;
+        if (nextCh && nextCh.idx !== undefined) {
             html += `
-                <div class="overview-recommended">
-                    <h3 style="margin:16px 0 8px;font-size:14px;color:var(--accent)">
-                        📚 智能学习路径
-                        <span style="font-size:11px;color:var(--text-secondary);font-weight:normal;margin-left:8px">
-                            核心 ${order.core_count || 0} / 总 ${order.total_count || 0} 章
-                        </span>
-                    </h3>
+                <div style="margin-bottom:20px;padding:16px;background:linear-gradient(135deg,rgba(253,203,110,0.15),rgba(253,203,110,0.05));border-radius:12px;border:2px solid rgba(255,193,7,0.3)">
+                    <div style="font-size:13px;font-weight:600;color:#d68910;margin-bottom:8px">🎯 立即学习</div>
+                    <div style="font-size:16px;font-weight:600">第${nextCh.idx + 1}章「${escapeHtml(nextCh.title || '')}」</div>
+                    ${nextCh.learning_goal ? `<div style="font-size:13px;color:var(--text-secondary);margin-top:4px">🎯 学习目标：${escapeHtml(nextCh.learning_goal)}</div>` : ''}
+                    ${nextCh.core_viewpoint ? `<div style="font-size:13px;color:var(--text-secondary);margin-top:2px">💡 核心观点：${escapeHtml(nextCh.core_viewpoint)}</div>` : ''}
+                    <button class="btn btn-primary btn-sm" style="margin-top:12px" onclick="hideProgressOverlay();switchView('course-detail');setTimeout(()=>startChat(${nextCh.idx}),300)">开始学习 →</button>
+                </div>
             `;
+        }
 
-            // 已学章节
-            if (order.learned && order.learned.length > 0) {
-                html += `
-                    <div style="margin-bottom:12px">
-                        <div style="font-size:12px;color:var(--success);margin-bottom:6px">✅ 已学习 (${order.learned.length})</div>
-                `;
-                order.learned.forEach(ch => {
-                    html += `
-                        <div style="display:flex;align-items:center;gap:8px;padding:6px 12px;background:rgba(0,206,201,0.05);border-radius:6px;margin-bottom:4px">
-                            <span style="font-size:13px;color:var(--text-secondary)">第${ch.idx + 1}章</span>
-                            <span style="flex:1;font-size:13px;color:var(--text-secondary);text-decoration:line-through">${escapeHtml(ch.title || '')}</span>
-                            ${ch.importance ? `<span style="font-size:11px;color:var(--text-secondary)">${'⭐'.repeat(ch.importance)}</span>` : ''}
-                        </div>
-                    `;
-                });
-                html += '</div>';
-            }
-
-            // 核心待学章节
-            if (order.core_to_learn && order.core_to_learn.length > 0) {
-                html += `
-                    <div style="margin-bottom:12px">
-                        <div style="font-size:12px;color:var(--danger);margin-bottom:6px">🔥 核心待学 (${order.core_to_learn.length})</div>
-                `;
-                order.core_to_learn.forEach((ch, idx) => {
-                    const depsBadge = ch.deps_satisfied
-                        ? '<span style="font-size:10px;color:var(--success)">✓ 可学</span>'
-                        : '<span style="font-size:10px;color:var(--warning)">⏳ 需先学</span>';
-                    html += `
-                        <div style="display:flex;flex-direction:column;gap:4px;padding:10px 12px;background:rgba(255,107,107,0.05);border-radius:8px;margin-bottom:6px;border-left:3px solid var(--danger)">
-                            <div style="display:flex;align-items:center;gap:8px">
-                                <span style="font-size:14px;font-weight:bold;color:var(--danger)">${idx + 1}.</span>
-                                <span style="flex:1;font-size:14px;font-weight:500">第${ch.idx + 1}章「${escapeHtml(ch.title || '')}」</span>
-                                ${ch.importance ? `<span style="font-size:11px">${'⭐'.repeat(ch.importance)}</span>` : ''}
+        // 核心待学章节
+        if (order.core_to_learn && order.core_to_learn.length > 0) {
+            html += `
+                <div style="margin-bottom:20px">
+                    <h3 style="margin:0 0 10px;font-size:14px;color:var(--danger)">🔥 核心待学 (${order.core_to_learn.length}章)</h3>
+                    ${order.core_to_learn.slice(0, 5).map((ch, idx) => {
+                        const depsBadge = ch.deps_satisfied
+                            ? '<span style="font-size:10px;color:var(--success)">✓ 可学</span>'
+                            : '<span style="font-size:10px;color:var(--warning)">⏳ 需先学</span>';
+                        return `
+                            <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:rgba(255,107,107,0.04);border-radius:8px;margin-bottom:4px;border-left:3px solid var(--danger)">
+                                <span style="font-size:13px;font-weight:bold;color:var(--danger);min-width:20px">${idx + 1}.</span>
+                                <span style="flex:1;font-size:13px">第${ch.idx + 1}章「${escapeHtml(ch.title || '')}」</span>
+                                ${ch.learning_goal ? `<span style="font-size:11px;color:var(--text-secondary)">🎯 ${escapeHtml(ch.learning_goal)}</span>` : ''}
                                 ${depsBadge}
                             </div>
-                            ${ch.learning_goal ? `<div style="font-size:12px;color:var(--text-secondary);margin-left:24px">🎯 ${escapeHtml(ch.learning_goal)}</div>` : ''}
-                            ${ch.dependencies && ch.dependencies.length > 0 ? `<div style="font-size:11px;color:var(--text-secondary);margin-left:24px">📎 依赖: 第${ch.dependencies.map(d => d+1).join('、')}章</div>` : ''}
-                        </div>
-                    `;
-                });
-                html += '</div>';
-            }
-
-            // 可选章节
-            if (order.optional && order.optional.length > 0) {
-                html += `
-                    <div>
-                        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px">📚 可选阅读 (${order.optional.length})</div>
-                `;
-                order.optional.slice(0, 3).forEach(ch => {
-                    html += `
-                        <div style="display:flex;align-items:center;gap:8px;padding:6px 12px;background:var(--bg-secondary);border-radius:6px;margin-bottom:4px;opacity:0.7">
-                            <span style="font-size:13px;color:var(--text-secondary)">第${ch.idx + 1}章</span>
-                            <span style="flex:1;font-size:13px;color:var(--text-secondary)">${escapeHtml(ch.title || '')}</span>
-                            ${ch.importance ? `<span style="font-size:11px">${'⭐'.repeat(ch.importance)}</span>` : ''}
-                        </div>
-                    `;
-                });
-                if (order.optional.length > 3) {
-                    html += `<div style="font-size:11px;color:var(--text-secondary);padding:4px 12px">还有 ${order.optional.length - 3} 章可选...</div>`;
-                }
-                html += '</div>';
-            }
-
-            html += '</div>';
-        } else if (Array.isArray(overview.recommended_order) && overview.recommended_order.length > 0) {
-            // 细读/研读模式：简单列表
-            html += `
-                <div class="overview-recommended">
-                    <h3 style="margin:16px 0 8px;font-size:14px;color:var(--accent)">📚 推荐学习顺序</h3>
+                        `;
+                    }).join('')}
+                    ${order.core_to_learn.length > 5 ? `<div style="font-size:11px;color:var(--text-secondary);padding:4px 12px">还有 ${order.core_to_learn.length - 5} 章...</div>` : ''}
+                </div>
             `;
-            overview.recommended_order.forEach((ch, idx) => {
-                const priorityBadge = ch.priority === 'high' ? '🔥' : (ch.priority === 'medium' ? '📖' : '✅');
-                const statusBadge = ch.status === '已完成' ? '✅' : (ch.status === '进行中' ? '🔄' : '📝');
+        }
+
+        // 已学章节（简化显示）
+        if (order.learned && order.learned.length > 0) {
+            html += `
+                <div style="margin-bottom:20px">
+                    <h3 style="margin:0 0 10px;font-size:14px;color:var(--success)">✅ 已学习 (${order.learned.length}章)</h3>
+                    <div style="display:flex;flex-wrap:wrap;gap:4px">
+                        ${order.learned.map(ch => `
+                            <span style="font-size:11px;padding:3px 8px;background:rgba(0,184,148,0.08);color:var(--success);border-radius:4px">第${ch.idx + 1}章</span>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+        }
+    }
+
+    // === 第四部分：章节进度总览（精简显示）===
+    if (overview.chapter_stats && overview.chapter_stats.length > 0) {
+        // 只显示有进度的章节
+        const activeChapters = overview.chapter_stats.filter(ch => ch.importance > 0 || ch.mastered > 0);
+        
+        if (activeChapters.length > 0) {
+            html += `
+                <div style="margin-bottom:20px">
+                    <h3 style="margin:0 0 10px;font-size:14px">📊 重点章节进度</h3>
+            `;
+            activeChapters.slice(0, 10).forEach(ch => {
+                const chPercent = ch.total > 0 ? Math.round(ch.mastered / ch.total * 100) : (ch.importance > 0 ? 0 : 100);
+                const importanceStar = ch.importance > 0.7 ? '⭐' : '';
                 html += `
-                    <div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)">
-                        <span style="font-size:16px;font-weight:bold;color:var(--text-secondary)">${idx + 1}.</span>
-                        <span style="flex:1;font-size:13px">${escapeHtml(ch.title || `第${ch.idx + 1}章`)}</span>
-                        <span style="font-size:11px">${priorityBadge}</span>
-                        <span style="font-size:11px;color:${ch.status === '已完成' ? 'var(--success)' : 'var(--text-secondary)'}">${statusBadge} ${ch.status || ''}</span>
-                        ${ch.progress ? `<span style="font-size:11px;color:var(--text-secondary)">${ch.progress}</span>` : ''}
+                    <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px">
+                        <span style="min-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(ch.title || `第${ch.idx + 1}章`)}${importanceStar}</span>
+                        <div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden">
+                            <div style="height:100%;width:${chPercent}%;background:${chPercent === 100 ? 'var(--success)' : 'var(--accent)'};border-radius:3px"></div>
+                        </div>
+                        <span style="min-width:40px;text-align:right;font-size:11px;color:var(--text-secondary)">${chPercent}%</span>
                     </div>
                 `;
             });
@@ -3085,53 +3594,14 @@ function renderCourseOverviewModal(overview) {
         }
     }
 
-    // 下一个推荐章节（速读模式：基于三级推荐）
-    let nextCh = overview.next_chapter;
-    if (isSpeedMode && overview.recommended_order && !Array.isArray(overview.recommended_order)) {
-        nextCh = overview.recommended_order.next_chapter;
-    }
-
-    if (nextCh && (Array.isArray(overview.recommended_order) || isSpeedMode)) {
-        const showNext = isSpeedMode
-            ? (nextCh && (nextCh.idx !== undefined))
-            : (nextCh && nextCh.status !== '已完成');
-
-        if (showNext) {
-            html += `
-                <div class="overview-next" style="margin-top:16px;padding:12px;background:linear-gradient(135deg,rgba(108,92,231,0.1),rgba(108,92,231,0.05));border-radius:12px;border:1px solid var(--accent)">
-                    <h3 style="margin:0 0 8px;font-size:14px;color:var(--accent)">🎯 下一步推荐</h3>
-                    <p style="margin:0;font-size:14px">
-                        <strong>第${nextCh.idx + 1}章「${escapeHtml(nextCh.title || '')}」</strong>
-                        ${nextCh.progress ? `<span style="color:var(--text-secondary)"> (${nextCh.progress})</span>` : ''}
-                    </p>
-                    ${nextCh.learning_goal ? `<p style="margin:4px 0 0;font-size:12px;color:var(--text-secondary)">🎯 ${escapeHtml(nextCh.learning_goal)}</p>` : ''}
-                </div>
-            `;
-        }
-    }
-
+    // === 第五部分：学习建议（如有）===
     if (overview.recommendation) {
         html += `
-            <div class="overview-recommendation">
-                <h3 style="margin:16px 0 8px;font-size:14px">💡 建议</h3>
-                <p>${escapeHtml(overview.recommendation)}</p>
+            <div style="padding:16px;background:rgba(108,92,231,0.05);border-radius:12px;border:1px solid rgba(108,92,231,0.15)">
+                <h3 style="margin:0 0 8px;font-size:14px;color:var(--accent)">💡 学习建议</h3>
+                <p style="margin:0;font-size:13px;line-height:1.6">${escapeHtml(overview.recommendation)}</p>
             </div>
         `;
-    }
-
-    // 速读模式：显示全局精华按钮
-    if (isSpeedMode && overview.highlights) {
-        const h = overview.highlights;
-        if (h.key_points && h.key_points.length > 0) {
-            html += `
-                <div style="margin-top:20px;padding:16px;background:linear-gradient(135deg, rgba(108,92,231,0.08), rgba(6,214,160,0.08));border-radius:12px">
-                    <h3 style="margin-bottom:12px;font-size:15px">🔥 全书核心知识点</h3>
-            `;
-            h.key_points.slice(0, 5).forEach((point, i) => {
-                html += `<div style="margin-bottom:8px;font-size:14px;padding:8px;background:white;border-radius:8px">${i < 3 ? '🔥' : '📌'} ${escapeHtml(point)}</div>`;
-            });
-            html += '</div>';
-        }
     }
 
     container.innerHTML = html;

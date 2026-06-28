@@ -598,6 +598,7 @@ def _clean_chapter_title(title: str, content: str = "") -> str:
     清理章节标题，提升可读性
     1. 去除无意义的前缀（如数字编号）
     2. 如果标题太短或无意义，从正文中提取
+    3. 特殊处理"段落N"等暴力分章标题
     """
     if not title:
         return "未命名章节"
@@ -607,26 +608,29 @@ def _clean_chapter_title(title: str, content: str = "") -> str:
 
     # 检查标题是否太短或只有数字（无意义）
     import re
-    # 匹配纯数字、纯字母、或只有章节编号的标题
+    # 匹配无意义的标题格式
     is_meaningless = (
         len(title.strip()) < 2 or  # 太短
         re.match(r'^[\d\s\.\-]+$', title.strip()) or  # 只有数字和符号
         re.match(r'^第\s*\d+\s*章?\s*$', title.strip()) or  # 只有"第X章"
-        re.match(r'^(chapter|ch|section|sec)\s*\d+$', title.strip(), re.IGNORECASE)  # 只有英文章节号
+        re.match(r'^(chapter|ch|section|sec)\s*\d+$', title.strip(), re.IGNORECASE) or  # 只有英文章节号
+        re.match(r'^段落\s*\d+$', title.strip()) or  # "段落N"格式
+        re.match(r'^(chunk|part|block)\s*\d+$', title.strip(), re.IGNORECASE)  # "chunk N"等
     )
 
     if is_meaningless and content:
         # 尝试从正文中提取第一句有意义的句子作为标题
         paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
         for para in paragraphs[:3]:  # 最多尝试前3段
-            # 取第一句（不超过30字）
-            sentences = re.split(r'[。.!？]', para)
+            # 取第一句（不超过40字，给语录类内容更多空间）
+            sentences = re.split(r'[。.!？\n]', para)
             for s in sentences:
                 s = s.strip()
-                if len(s) >= 4 and len(s) <= 30:
-                    # 去除可能的引号
-                    s = re.sub(r'^["""\'"]+|["""\'"]+$', '', s)
-                    return s
+                if len(s) >= 8 and len(s) <= 40:
+                    # 去除可能的引号和编号
+                    s = re.sub(r'^["""\'"\d\.]+', '', s).strip()
+                    if len(s) >= 5:  # 清理后至少还有5个字
+                        return s
         return f"第{title.strip()}节" if title.strip() else "未命名章节"
 
     # 清理多余的空白

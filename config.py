@@ -295,7 +295,7 @@ WS_HEARTBEAT_INTERVAL = 30
 
 # 服务器配置
 HOST = os.getenv("WENQU_HOST", "127.0.0.1")
-PORT = int(os.getenv("WENQU_PORT", "8765"))
+PORT = int(os.getenv("WENQU_PORT", "8766"))
 
 # ==================== LLM 多模型层级配置 ====================
 MODEL_TIER_CONFIG = {

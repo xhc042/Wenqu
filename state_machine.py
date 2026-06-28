@@ -876,6 +876,4 @@ class DialogueStateMachine:
             if content:
                 db.add_summary(self.course_id, self.session_id, content)
         except Exception:
-                db.add_summary(self.course_id, self.session_id, content)
-        except Exception:
             pass

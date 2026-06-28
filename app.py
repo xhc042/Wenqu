@@ -32,6 +32,18 @@ from chunker import extract_text, smart_chunk, generate_syllabus_items, generate
 from state_machine import DialogueStateMachine
 from llm_client import llm
 
+# ==================== 异步任务管理系统 ====================
+# 任务状态枚举
+TASK_STATUS = {
+    "PENDING": "pending",
+    "PROCESSING": "processing",
+    "COMPLETED": "completed",
+    "FAILED": "failed",
+}
+
+# 内存任务存储: {task_id: {"status", "progress", "steps", "current_step", "course_id", "error"}}
+async_tasks: dict[str, dict] = {}
+
 def _utc(dt):
     return (dt + 'Z') if dt else dt
 
@@ -45,6 +57,18 @@ def _utc_dict(d, field):
 
 def _utc_list(items, field):
     return [_utc_dict(item, field) for item in items] if items else []
+
+
+def _add_default_syllabus_items(course_id: str, chapters: list):
+    """生成默认掌握项（当LLM生成失败时使用）"""
+    defaults = [
+        "能用自己的话复述本章的核心观点",
+        "能解释本章涉及的关键概念",
+        "能用自己的话举例说明本章内容",
+    ]
+    for idx, (title, _) in enumerate(chapters):
+        for desc in defaults:
+            db.add_syllabus_item(course_id, idx, desc)
 
 
 # ==================== 初始化 ====================
@@ -105,8 +129,11 @@ async def index():
     if index_path.exists():
         content = index_path.read_text(encoding="utf-8")
         content = content.replace("{{VERSION}}", VERSION)
-        return HTMLResponse(content)
-    return HTMLResponse(f"<h1>问渠 v{VERSION}</h1><p>前端页面未找到，请确保static/index.html存在。</p>")
+        return HTMLResponse(content=content, media_type="text/html; charset=utf-8")
+    return HTMLResponse(
+        content=f"<h1>问渠 v{VERSION}</h1><p>前端页面未找到，请确保static/index.html存在。</p>",
+        media_type="text/html; charset=utf-8"
+    )
 
 
 @app.get("/favicon.ico")
@@ -121,6 +148,291 @@ async def favicon():
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "version": VERSION}
+
+
+# ==================== 异步任务管理 ====================
+@app.post("/api/tasks/chapters-generate")
+async def create_chapter_generation_task(data: dict):
+    """创建分章任务（异步）"""
+    course_id = data.get("course_id")
+    if not course_id:
+        raise HTTPException(400, "缺少course_id")
+    
+    task_id = str(uuid.uuid4())[:8]
+    async_tasks[task_id] = {
+        "task_id": task_id,
+        "course_id": course_id,
+        "type": "chapters_generate",
+        "status": TASK_STATUS["PENDING"],
+        "progress": 0,
+        "steps": [
+            {"name": "正在智能分章...", "status": "pending", "detail": ""},
+            {"name": "生成教学大纲", "status": "pending", "detail": ""},
+            {"name": "完成", "status": "pending", "detail": ""},
+        ],
+        "current_step": 0,
+        "result": None,
+        "error": None,
+        "created_at": datetime.now().isoformat(),
+    }
+    
+    # 启动后台任务
+    asyncio.create_task(run_chapter_generation(task_id))
+    
+    return {"task_id": task_id}
+
+
+async def run_chapter_generation(task_id: str):
+    """后台执行分章和大纲生成的异步任务"""
+    task = async_tasks.get(task_id)
+    if not task:
+        return
+    
+    try:
+        task["status"] = TASK_STATUS["PROCESSING"]
+        task["steps"][0]["status"] = "processing"
+        task["current_step"] = 0
+        
+        course_id = task["course_id"]
+        course = db.get_course(course_id)
+        if not course:
+            raise Exception("课程不存在")
+        
+        source_path = course.get("source_path", "")
+        source_type = course.get("source_type", "")
+        reading_mode = course.get("reading_mode", "standard")
+        
+        # 步骤1: 智能分章
+        task["steps"][0]["detail"] = "正在分析文本结构..."
+        actual_type = source_type
+        if source_type == "text":
+            actual_type = "txt"
+        text = await extract_text(source_path, actual_type)
+        
+        if not text:
+            raise Exception("无法提取文本内容")
+        
+        task["steps"][0]["detail"] = "正在智能分章..."
+        chapters = await smart_chunk(text, source_type=source_type, file_path=source_path if source_type == "epub" else "", reading_mode=reading_mode)
+        task["steps"][0]["status"] = "done"
+        task["steps"][0]["detail"] = f"分章完成，共{len(chapters)}章"
+        task["progress"] = 30
+        
+        # 保存章节到数据库（复用原有逻辑）
+        is_speed = reading_mode == "speed"
+        max_loaded = 3 if reading_mode == "deep" else 99
+        
+        chapter_titles = []
+        for idx, chapter_item in enumerate(chapters):
+            if isinstance(chapter_item, tuple) and len(chapter_item) >= 3:
+                title, content = chapter_item[0], chapter_item[1]
+                meta = chapter_item[2] if len(chapter_item) > 2 else {}
+            elif isinstance(chapter_item, tuple):
+                title, content = chapter_item[0], chapter_item[1]
+                meta = {}
+            else:
+                title, content = str(chapter_item), ""
+                meta = {}
+            
+            chapter_titles.append(title)
+            
+            if is_speed:
+                is_loaded = 0
+                content_short = content[:500] if content else ""
+            else:
+                is_loaded = 1 if idx < max_loaded else 0
+                content_short = content[:5000] if content else ""
+            
+            db.add_chapter(
+                course_id=course_id,
+                idx=meta.get("idx", idx),
+                title=title,
+                content_slice=content_short,
+                summary="",
+                content_full=content if is_loaded else "",
+                is_loaded=is_loaded,
+                parent_idx=meta.get("parent_idx", -1),
+                level=meta.get("level", 0),
+                sort_order=meta.get("sort_order", str(idx)),
+            )
+        
+        db.add_learning_event(course_id, "lesson_end", {"action": "chapters_generated", "count": len(chapters)})
+        
+        # 速读模式额外处理
+        if is_speed:
+            task["steps"][0]["detail"] = "正在生成知识快照..."
+            try:
+                snapshots = []
+                for chapter_item in chapters:
+                    if isinstance(chapter_item, tuple) and len(chapter_item) >= 3:
+                        title, content, meta = chapter_item[0], chapter_item[1], chapter_item[2]
+                        chapter_idx = meta.get("idx", 0)
+                    elif isinstance(chapter_item, tuple) and len(chapter_item) >= 2:
+                        title, content = chapter_item[0], chapter_item[1]
+                        chapter_idx = 0
+                    else:
+                        continue
+                    
+                    snapshot_content = ""
+                    if source_type == "epub" and source_path:
+                        from chunker import extract_toc_from_epub, extract_chapter_content_by_href
+                        toc_items, _ = await extract_toc_from_epub(source_path)
+                        for toc_item in toc_items:
+                            if toc_item.get("idx") == chapter_idx:
+                                href = toc_item.get("href", "")
+                                if href:
+                                    snapshot_content = await extract_chapter_content_by_href(source_path, href)
+                                break
+                    
+                    if not snapshot_content:
+                        snapshot_content = content
+                    
+                    if not snapshot_content:
+                        continue
+                    
+                    snapshot = await extract_chapter_snapshot(snapshot_content, title)
+                    snapshots.append(snapshot)
+                    db.add_chapter_snapshot(
+                        course_id, chapter_idx,
+                        json.dumps(snapshot.get("keywords", []), ensure_ascii=False),
+                        snapshot.get("core_viewpoint", ""),
+                        global_priority=snapshot.get("importance", 0),
+                        learning_goal=snapshot.get("learning_goal", ""),
+                        importance=snapshot.get("importance", 0),
+                        difficulty=snapshot.get("difficulty", ""),
+                    )
+                
+                if snapshots:
+                    task["steps"][0]["detail"] = "正在提炼全局精华..."
+                    highlights = await generate_global_highlights(course_id, snapshots, chapter_titles)
+                    db.add_global_highlights(
+                        course_id,
+                        json.dumps(highlights.get("key_points", []), ensure_ascii=False),
+                        json.dumps(highlights.get("chapter_priorities", []), ensure_ascii=False),
+                        highlights.get("relationships", ""),
+                        json.dumps(highlights.get("core_chapter_indices", []), ensure_ascii=False),
+                        json.dumps(highlights.get("chapter_dependencies", {}), ensure_ascii=False),
+)
+
+                    try:
+                        syllabus_items = await generate_speed_read_syllabus(course_id, chapters, snapshots)
+                        if syllabus_items:
+                            # 先删旧数据避免重复
+                            _sc = db.get_conn()
+                            try:
+                                _sc.execute("DELETE FROM syllabus_items WHERE course_id=?", (course_id,))
+                                _sc.commit()
+                            finally:
+                                _sc.close()
+                            for ch_idx, desc in syllabus_items:
+                                db.add_syllabus_item(course_id, ch_idx, desc)
+                    except Exception:
+                        pass
+            except Exception as e:
+                import logging
+                logging.warning(f"速读模式快照生成失败: {e}")
+        
+        task["progress"] = 50
+        
+        # 步骤2: 生成教学大纲（非速读模式）
+        if reading_mode != "speed":
+            task["steps"][1]["status"] = "processing"
+            task["current_step"] = 1
+            task["steps"][1]["detail"] = "正在生成掌握项..."
+            
+            chapters_db = db.get_chapters(course_id)
+            ch_list = [(ch["title"], ch.get("content_slice", "")) for ch in chapters_db if ch.get("is_loaded", 1)]
+            
+            if ch_list:
+                # 先删除旧知识点，防止重复追加（任务重跑时避免叠加）
+                _conn = db.get_conn()
+                try:
+                    _conn.execute("DELETE FROM syllabus_items WHERE course_id=?", (course_id,))
+                    _conn.commit()
+                finally:
+                    _conn.close()
+
+                try:
+                    items = await generate_syllabus_items(course_id, ch_list)
+                    if items:
+                        for chapter_index, description in items:
+                            db.add_syllabus_item(course_id, chapter_index, description)
+                        task["steps"][1]["status"] = "done"
+                        task["steps"][1]["detail"] = f"大纲生成完成，共{len(items)}个掌握项"
+                    else:
+                        # LLM返回空，使用默认掌握项
+                        import logging
+                        logging.warning(f"[异步任务 {task_id}] LLM返回空掌握项，使用默认值")
+                        _add_default_syllabus_items(course_id, ch_list)
+                        task["steps"][1]["status"] = "done"
+                        task["steps"][1]["detail"] = "大纲生成完成（使用默认项）"
+                except Exception as e:
+                    import logging
+                    logging.error(f"[异步任务 {task_id}] 掌握项生成失败: {e}", exc_info=True)
+                    # 失败时使用默认掌握项确保课程可用
+                    _add_default_syllabus_items(course_id, ch_list)
+                    task["steps"][1]["status"] = "done"
+                    task["steps"][1]["detail"] = "大纲生成完成（使用默认项）"
+            else:
+                task["steps"][1]["status"] = "done"
+                task["steps"][1]["detail"] = "无已加载章节"
+            
+            task["progress"] = 80
+        else:
+            task["steps"][1]["status"] = "done"
+            task["steps"][1]["detail"] = "速读模式跳过"
+            task["progress"] = 80
+        
+        # 步骤3: 完成
+        task["steps"][2]["status"] = "done"
+        task["steps"][2]["detail"] = "全部完成"
+        task["status"] = TASK_STATUS["COMPLETED"]
+        task["progress"] = 100
+        
+    except Exception as e:
+        import logging
+        logging.error(f"异步任务 {task_id} 失败: {e}", exc_info=True)
+        task["status"] = TASK_STATUS["FAILED"]
+        task["error"] = str(e)
+        if task["steps"]:
+            task["steps"][task["current_step"]]["status"] = "error"
+            task["steps"][task["current_step"]]["detail"] = f"失败: {str(e)[:50]}"
+
+
+@app.get("/api/tasks/{task_id}")
+async def get_task_status(task_id: str):
+    """查询异步任务状态"""
+    task = async_tasks.get(task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    
+    return {
+        "task_id": task["task_id"],
+        "course_id": task["course_id"],
+        "type": task["type"],
+        "status": task["status"],
+        "progress": task["progress"],
+        "steps": task["steps"],
+        "current_step": task["current_step"],
+        "error": task.get("error"),
+        "result": task.get("result"),
+        "created_at": task.get("created_at"),
+    }
+
+
+@app.delete("/api/tasks/{task_id}")
+async def cancel_task(task_id: str):
+    """取消异步任务"""
+    task = async_tasks.get(task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    
+    if task["status"] in [TASK_STATUS["COMPLETED"], TASK_STATUS["FAILED"]]:
+        return {"status": "already_finished"}
+    
+    task["status"] = TASK_STATUS["FAILED"]
+    task["error"] = "用户取消"
+    return {"status": "cancelled"}
 
 
 # ==================== 课程管理 ====================
@@ -207,7 +519,35 @@ async def create_course(data: dict):
         finally:
             conn.close()
 
-    return {"course_id": course_id, "title": title, "source_type": source_type}
+    # 如果有内容来源，自动启动异步分章任务
+    task_id = None
+    if source_type != "recommendation" and source_path:
+        task_id = str(uuid.uuid4())[:8]
+        async_tasks[task_id] = {
+            "task_id": task_id,
+            "course_id": course_id,
+            "type": "chapters_generate",
+            "status": TASK_STATUS["PENDING"],
+            "progress": 0,
+            "steps": [
+                {"name": "正在智能分章...", "status": "pending", "detail": ""},
+                {"name": "生成教学大纲", "status": "pending", "detail": ""},
+                {"name": "完成", "status": "pending", "detail": ""},
+            ],
+            "current_step": 0,
+            "result": None,
+            "error": None,
+            "created_at": datetime.now().isoformat(),
+        }
+        # 启动后台任务
+        import logging
+        logging.info(f"[异步任务] 创建任务 {task_id} 用于课程 {course_id}")
+        asyncio.create_task(run_chapter_generation(task_id))
+
+    result = {"course_id": course_id, "title": title, "source_type": source_type}
+    if task_id:
+        result["task_id"] = task_id
+    return result
 
 
 @app.post("/api/courses/upload")
@@ -256,6 +596,21 @@ async def get_course(course_id: str):
     sessions = _utc_list(db.get_sessions(course_id), "started_at")
     stats = db.get_course_learning_stats(course_id)
 
+    # 查询该课程的活跃分章任务
+    active_task = None
+    for task_id, task in async_tasks.items():
+        if task.get("course_id") == course_id and task.get("status") in ["pending", "processing"]:
+            active_task = {
+                "task_id": task["task_id"],
+                "type": task["type"],
+                "status": task["status"],
+                "progress": task["progress"],
+                "steps": task["steps"],
+                "current_step": task["current_step"],
+                "error": task.get("error"),
+            }
+            break
+
     # ?????????????
     all_group_chats = []
     for s in sessions:
@@ -276,6 +631,7 @@ async def get_course(course_id: str):
         "group_chats": all_group_chats,
         "sessions_count": len(sessions),
         "learning_stats": stats,
+        "active_task": active_task,  # 活跃的分章任务
     }
 
 
@@ -312,6 +668,26 @@ async def generate_chapters(course_id: str):
     # 速读模式：全量章节直接设为懒加载占位
     is_speed = reading_mode == "speed"
     max_loaded = 3 if reading_mode == "deep" else 99  # 研读只预加载前3章
+
+    # 获取快照映射（用于章节列表展示）
+    snapshot_map = {}
+    core_indices = set()
+    if is_speed:
+        try:
+            snapshots = db.get_chapter_snapshots(course_id)
+            for s in snapshots:
+                snapshot_map[s["chapter_index"]] = s
+            
+            # 获取核心章节索引
+            highlights = db.get_global_highlights(course_id)
+            if highlights:
+                for s in highlights.get("core_chapter_indices", []):
+                    import re as _re
+                    m = _re.search(r'第(\d+)章', str(s))
+                    if m:
+                        core_indices.add(int(m.group(1)) - 1)
+        except Exception:
+            pass
 
     # 保存章节到数据库
     chapter_titles = []
@@ -421,8 +797,16 @@ async def generate_chapters(course_id: str):
                 logging.info(f"[速读模式] 开始生成精华掌握项")
                 try:
                     syllabus_items = await generate_speed_read_syllabus(course_id, chapters, snapshots)
-                    for ch_idx, desc in syllabus_items:
-                        db.add_syllabus_item(course_id, ch_idx, desc)
+                    if syllabus_items:
+                        # 先删旧数据避免重复
+                        _sc3 = db.get_conn()
+                        try:
+                            _sc3.execute("DELETE FROM syllabus_items WHERE course_id=?", (course_id,))
+                            _sc3.commit()
+                        finally:
+                            _sc3.close()
+                        for ch_idx, desc in syllabus_items:
+                            db.add_syllabus_item(course_id, ch_idx, desc)
                     logging.info(f"[速读模式] 完成，生成了 {len(syllabus_items)} 条精华掌握项")
                 except Exception as syllabus_err:
                     logging.warning(f"[速读模式] 精华掌握项生成失败: {syllabus_err}")
@@ -433,10 +817,18 @@ async def generate_chapters(course_id: str):
                 "snapshots_generated": len(snapshots),
                 "highlights_generated": bool(snapshots),
                 "reading_mode": "speed",
+                "core_chapter_indices": list(core_indices),
                 "chapters": [
-                    {"idx": c[2].get("idx", i), "title": c[0], "is_loaded": False}
-                    if isinstance(c, tuple) and len(c) >= 3 else
-                    {"idx": i, "title": c[0] if isinstance(c, tuple) else str(c), "is_loaded": False}
+                    {
+                        "idx": c[2].get("idx", i) if isinstance(c, tuple) and len(c) >= 3 else i,
+                        "title": c[0] if isinstance(c, tuple) else str(c),
+                        "is_loaded": False,
+                        "importance": snapshot_map.get(i, {}).get("importance", 0),
+                        "keywords": snapshot_map.get(i, {}).get("keywords", []),
+                        "core_viewpoint": snapshot_map.get(i, {}).get("core_viewpoint", ""),
+                        "learning_goal": snapshot_map.get(i, {}).get("learning_goal", ""),
+                        "is_core": i in core_indices,
+                    }
                     for i, c in enumerate(chapters)
                 ],
             }
@@ -534,6 +926,14 @@ async def load_chapter_content(course_id: str, chapter_idx: int):
         conn.close()
 
     # 为此章节生成掌握项（懒加载触发首次生成）
+    # 先删除该章节的旧知识点，避免重复追加
+    _lc = db.get_conn()
+    try:
+        _lc.execute("DELETE FROM syllabus_items WHERE course_id=? AND chapter_index=?", (course_id, chapter_idx))
+        _lc.commit()
+    finally:
+        _lc.close()
+
     items = await generate_syllabus_items(course_id,
                                           [(chapter["title"], full_content)])
     for ch_idx, desc in items:
@@ -580,6 +980,53 @@ def _extract_chapter_from_text(full_text: str, chapter_title: str, chapter_idx: 
     return '\n\n'.join(paragraphs[start_para:end_para])
 
 
+# ==================== 手动生成掌握项 ====================
+@app.post("/api/courses/{course_id}/syllabus/regenerate")
+async def regenerate_syllabus(course_id: str):
+    """
+    手动重新生成掌握项（用于修复生成失败的课程）
+    会先删除旧的掌握项，再重新生成
+    """
+    course = db.get_course(course_id)
+    if not course:
+        raise HTTPException(404, "课程不存在")
+
+    chapters = db.get_chapters(course_id)
+    if not chapters:
+        raise HTTPException(400, "请先生成分章")
+
+    # 删除旧掌握项
+    conn = db.get_conn()
+    try:
+        conn.execute("DELETE FROM syllabus_items WHERE course_id=?", (course_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    # 获取已加载的章节
+    ch_list = [(ch["title"], ch.get("content_slice", "")) for ch in chapters if ch.get("is_loaded", 1)]
+    
+    if not ch_list:
+        raise HTTPException(400, "无已加载章节")
+
+    reading_mode = course.get("reading_mode", "standard")
+    
+    # 生成新掌握项
+    if reading_mode == "speed":
+        # 速读模式走快照路线
+        return {"message": "速读模式使用快照生成，请先生成知识快照", "count": 0}
+    else:
+        items = await generate_syllabus_items(course_id, ch_list)
+        if not items:
+            # LLM失败，使用默认项
+            _add_default_syllabus_items(course_id, ch_list)
+            return {"message": "LLM生成失败，使用默认掌握项", "count": len(ch_list) * 3}
+        
+        for chapter_index, description in items:
+            db.add_syllabus_item(course_id, chapter_index, description)
+        return {"message": "掌握项生成完成", "count": len(items)}
+
+
 @app.post("/api/courses/{course_id}/syllabus/generate")
 async def generate_syllabus(course_id: str):
     """生成掌握项清单（根据阅读模式调整深度）"""
@@ -602,6 +1049,14 @@ async def generate_syllabus(course_id: str):
     if not ch_list:
         return {"total_items": 0, "message": "无已加载章节，请先加载章节内容"}
 
+    # 先删除旧知识点，避免重复追加
+    conn = db.get_conn()
+    try:
+        conn.execute("DELETE FROM syllabus_items WHERE course_id=?", (course_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
     items = await generate_syllabus_items(course_id, ch_list)
 
     for chapter_index, description in items:
@@ -613,24 +1068,27 @@ async def generate_syllabus(course_id: str):
 # ==================== 苏格拉底预演 ====================
 @app.get("/api/courses/{course_id}/chapters/{chapter_idx}/preview")
 async def generate_next_preview(course_id: str, chapter_idx: int):
-    """基于当前章节内容，为下一章生成苏格拉底式预演引导"""
+    """
+    基于当前章节内容，为下一章生成苏格拉底式预演引导。
+    学生在进入下一章前，会看到1-2个引导性问题，带着思考学习效率更高。
+    """
     course = db.get_course(course_id)
     if not course:
         raise HTTPException(404, "课程不存在")
 
     next_chapter = db.get_chapter(course_id, chapter_idx + 1)
     if not next_chapter:
-        return {"preview": "", "next_title": ""}
+        return {"preview": "", "next_title": "", "questions": []}
 
     current_chapter = db.get_chapter(course_id, chapter_idx)
     if not current_chapter:
-        return {"preview": "", "next_title": next_chapter.get("title", "")}
+        return {"preview": "", "next_title": next_chapter.get("title", ""), "questions": []}
 
     current_content = current_chapter.get("content_slice", "")
     if not current_content:
-        return {"preview": "", "next_title": next_chapter.get("title", "")}
+        return {"preview": "", "next_title": next_chapter.get("title", ""), "questions": []}
 
-    # 用轻量模型生成预演引导
+    # 生成引导性问题
     prompt = f"""你是苏格拉底式学习引导者。
 
 当前章节内容摘要：
@@ -647,17 +1105,27 @@ async def generate_next_preview(course_id: str, chapter_idx: int):
 {{"questions": ["问题1", "问题2"]}}
 """
     try:
-        from llm_client import multi_llm
-        result = await multi_llm.chat_json("fast", [
+        result = await llm.chat_json([
             {"role": "system", "content": "你是苏格拉底式学习引导者。返回JSON。"},
             {"role": "user", "content": prompt},
         ])
         questions = result.get("questions", [])
-    except Exception:
+        if not questions or not isinstance(questions, list):
+            questions = []
+    except Exception as e:
+        import logging
+        logging.warning(f"苏格拉底预演生成失败: {e}")
         questions = []
 
+    # 构建预览文本
+    preview = ""
+    if questions:
+        preview = "带着以下问题去学习下一章，效率会更高："
+    else:
+        preview = f"准备学习「{next_chapter['title']}」吧！"
+
     return {
-        "preview": "根据上一章的底层逻辑，下一章" + next_chapter["title"] + "极大概率会涉及相关深化内容。",
+        "preview": preview,
         "next_title": next_chapter["title"],
         "questions": questions,
     }
@@ -1628,10 +2096,23 @@ async def get_course_overview(course_id: str):
     chapters = db.get_chapters(course_id)
     reading_mode = course.get("reading_mode", "standard")
 
+    import re
+    def parse_chapter_num(s: str) -> int:
+        """从'第N章'中提取数字"""
+        m = re.search(r'第(\d+)章', s)
+        return int(m.group(1)) - 1 if m else -1
+
     # 速读模式：使用章节快照数量作为统计
     if reading_mode == "speed":
         snapshots = db.get_chapter_snapshots(course_id)
-        highlights = db.get_global_highlights(course_id)
+        highlights = db.get_global_highlights(course_id) or {}
+
+        core_indices = set()
+        if highlights:
+            for s in highlights.get("core_chapter_indices", []):
+                idx = parse_chapter_num(s)
+                if idx >= 0:
+                    core_indices.add(idx)
 
         # 章节维度统计（基于快照）
         chapter_stats = []
@@ -1647,23 +2128,10 @@ async def get_course_overview(course_id: str):
                 "is_loaded": ch.get("is_loaded", 0),
                 "importance": snapshot.get("importance", 0) if snapshot else 0,
                 "learning_goal": snapshot.get("learning_goal", "") if snapshot else "",
+                "keywords": snapshot.get("keywords", []) if snapshot else [],
+                "core_viewpoint": snapshot.get("core_viewpoint", "") if snapshot else "",
+                "is_core": ch["idx"] in core_indices,
             })
-
-        # === 智能三级推荐学习顺序 ===
-        import re
-
-        def parse_chapter_num(s: str) -> int:
-            """从'第N章'中提取数字"""
-            m = re.search(r'第(\d+)章', s)
-            return int(m.group(1)) - 1 if m else -1
-
-        # 解析核心章节和依赖关系
-        core_indices = set()
-        if highlights:
-            for s in highlights.get("core_chapter_indices", []):
-                idx = parse_chapter_num(s)
-                if idx >= 0:
-                    core_indices.add(idx)
 
         chapter_dependencies = {}
         if highlights:
@@ -1687,7 +2155,7 @@ async def get_course_overview(course_id: str):
         # 已学习的章节
         learned_indices = {s.get("chapter_index") for s in chapter_stats if s["mastered"] > 0}
 
-        # 1. 已学习章节：按学习顺序
+        # 1. 已学习章节
         learned_list = []
         for ch in chapters:
             if ch["idx"] in learned_indices:
@@ -1699,7 +2167,7 @@ async def get_course_overview(course_id: str):
                     "importance": snapshot.get("importance", 0) if snapshot else 0,
                 })
 
-        # 2. 核心未学章节：基于依赖关系+重要性排序
+        # 2. 核心未学章节
         core_unlearned = []
         for ch in chapters:
             if ch["idx"] in learned_indices or ch["idx"] not in core_indices:
@@ -1715,14 +2183,13 @@ async def get_course_overview(course_id: str):
                 "deps_satisfied": all(d in learned_indices or d in core_indices for d in deps),
             })
 
-        # 拓扑排序：优先推荐依赖已满足的章节
+        # 拓扑排序
         def sort_by_deps(items):
-            """按依赖关系排序：依赖已满足的排前面"""
             return sorted(items, key=lambda x: (not x["deps_satisfied"], -x["importance"], x["idx"]))
 
         core_unlearned = sort_by_deps(core_unlearned)
 
-        # 3. 可选章节：非核心章节
+        # 3. 可选章节
         optional_list = []
         for ch in chapters:
             if ch["idx"] in learned_indices or ch["idx"] in core_indices:
@@ -1736,29 +2203,20 @@ async def get_course_overview(course_id: str):
             })
         optional_list.sort(key=lambda x: (-x["importance"], x["idx"]))
 
-        # 构建最终推荐数据结构
         recommended_order = {
             "core_count": len(core_indices),
             "total_count": len(chapters),
             "learned": learned_list,
-            "core_to_learn": core_unlearned,  # 核心待学
-            "optional": optional_list,  # 可选
+            "core_to_learn": core_unlearned,
+            "optional": optional_list,
             "next_chapter": core_unlearned[0] if core_unlearned else (optional_list[0] if optional_list else None),
         }
 
-        # 薄弱环节：未学习章节（简化展示）
         weak_areas = [
-            {
-                "id": ch["idx"],
-                "description": f"第{ch['idx'] + 1}章「{ch['title']}」",
-                "chapter_index": ch["idx"],
-                "status": "未学习",
-                "is_core": ch["idx"] in core_indices
-            }
+            {"id": ch["idx"], "description": f"第{ch['idx'] + 1}章「{ch['title']}」", "chapter_index": ch["idx"], "status": "未学习", "is_core": ch["idx"] in core_indices}
             for ch in chapters if ch["idx"] not in learned_indices
         ][:5]
 
-        # 知识覆盖率：核心章节的完成度
         core_total = len(core_indices) if core_indices else len(chapters)
         core_learned = sum(1 for ch in chapters if ch["idx"] in core_indices and ch["idx"] in learned_indices)
         core_percent = round(core_learned / core_total * 100, 1) if core_total > 0 else 0
@@ -1767,129 +2225,91 @@ async def get_course_overview(course_id: str):
         mastered_points = len(snapshots)
         percent = 100.0 if total_points > 0 else 0.0
 
-        strategy = {
-            "speed": "精华提炼模式 — 聚焦最重要的20%知识点",
-            "standard": "系统学习模式 — 逐章覆盖全部知识点",
-            "deep": "辩证分析模式 — 深度理解+批判性思考",
-        }
-
-        # 智能建议
+        strategy = {"speed": "精华提炼模式", "standard": "系统学习模式", "deep": "辩证分析模式"}
         next_ch = recommended_order["next_chapter"]
         if total_points == 0:
             recommendation = "正在生成知识快照，请稍候..."
         elif next_ch:
             recommendation = f"建议先学核心章节，下一站：第{next_ch['idx']+1}章「{next_ch['title']}」"
         else:
-            recommendation = f"🎉 核心章节已学完！共掌握{core_learned}/{core_total}个核心章节（{core_percent}%）"
+            recommendation = f"核心章节已学完！共掌握{core_learned}/{core_total}个核心章节（{core_percent}%）"
 
         return {
             "reading_mode": reading_mode,
             "strategy_description": strategy.get(reading_mode, strategy["standard"]),
-            "knowledge_coverage": {
-                "total_points": total_points,
-                "mastered_points": mastered_points,
-                "percent": percent,
-                "total_chapters": len(chapters),
-                "core_chapters": core_total,
-                "core_learned": core_learned,
-                "core_percent": core_percent,
-            },
+            "knowledge_coverage": {"total_points": total_points, "mastered_points": mastered_points, "percent": percent, "total_chapters": len(chapters), "core_chapters": core_total, "core_learned": core_learned, "core_percent": core_percent},
             "chapter_stats": chapter_stats,
-            "recommended_order": recommended_order,  # 新的三级结构
+            "recommended_order": recommended_order,
             "weak_areas": weak_areas,
             "recommendation": recommendation,
             "highlights": highlights,
         }
-
-    # 细读/研读模式：使用掌握项统计
-    total_points = len(syllabus)
-    mastered_points = sum(1 for s in syllabus if s["status"] == "mastered")
-
-    # 章节维度统计
-    chapter_stats = []
-    for ch in chapters:
-        ch_items = [s for s in syllabus if s["chapter_index"] == ch["idx"]]
-        chapter_stats.append({
-            "idx": ch["idx"],
-            "title": ch["title"],
-            "total": len(ch_items),
-            "mastered": sum(1 for s in ch_items if s["status"] == "mastered"),
-            "is_loaded": ch.get("is_loaded", 0),
-        })
-
-    strategy = {
-        "speed": "精华提炼模式 — 聚焦最重要的20%知识点",
-        "standard": "系统学习模式 — 逐章覆盖全部知识点",
-        "deep": "辩证分析模式 — 深度理解+批判性思考",
-    }
-
-    # 识别薄弱环节：未掌握的知识点
-    pending = [s for s in syllabus if s["status"] == "pending"]
-    weak_areas = [
-        {"id": s["id"], "description": s["description"], "chapter_index": s["chapter_index"], "status": "未掌握"}
-        for s in pending[:5]
-    ]
-
-    # 智能学习顺序推荐：按章节掌握度推荐
-    # 优先推荐：未开始的章节 > 进行中的章节 > 已掌握的章节
-    recommended_order = []
-    for ch in chapters:
-        ch_items = [s for s in syllabus if s["chapter_index"] == ch["idx"]]
-        mastered = sum(1 for s in ch_items if s["status"] == "mastered")
-        total = len(ch_items)
-        
-        if total == 0:
-            continue
-        
-        mastered_ratio = mastered / total if total > 0 else 0
-        if mastered_ratio == 0:
-            priority = "high"  # 未开始
-        elif mastered_ratio < 1:
-            priority = "medium"  # 进行中
-        else:
-            priority = "low"  # 已完成
-        
-        recommended_order.append({
-            "idx": ch["idx"],
-            "title": ch["title"],
-            "priority": priority,
-            "progress": f"{mastered}/{total}",
-            "status": "已完成" if mastered_ratio == 1 else ("进行中" if mastered_ratio > 0 else "未开始"),
-        })
-
-    # 按优先级排序
-    priority_order = {"high": 0, "medium": 1, "low": 2}
-    recommended_order.sort(key=lambda x: (priority_order.get(x["priority"], 3), x["idx"]))
-
-    # 生成下一步行动建议
-    percent = round(mastered_points / max(total_points, 1) * 100, 1)
-    
-    # 找到下一个推荐章节
-    next_chapter = next((ch for ch in recommended_order if ch["status"] != "已完成"), None)
-    
-    if percent < 30:
-        recommendation = f"建议从第{next_chapter['idx'] + 1}章「{next_chapter['title']}」开始学习"
-    elif percent < 50:
-        recommendation = f"继续学习第{next_chapter['idx'] + 1}章「{next_chapter['title']}」，完成更多掌握项"
-    elif percent < 100:
-        recommendation = f"还剩{len(pending)}个知识点未完成，继续加油！"
     else:
-        recommendation = "恭喜！可以申请结业答辩了"
+        # 细读/研读模式：使用掌握项统计
+        total_points = len(syllabus)
+        mastered_points = sum(1 for s in syllabus if s["status"] == "mastered")
 
-    return {
-        "reading_mode": reading_mode,
-        "strategy_description": strategy.get(reading_mode, strategy["standard"]),
-        "knowledge_coverage": {
-            "total_points": total_points,
-            "mastered_points": mastered_points,
-            "percent": percent,
-        },
-        "chapter_stats": chapter_stats,
-        "recommended_order": recommended_order[:5],  # 推荐前5章
-        "weak_areas": weak_areas,
-        "recommendation": recommendation,
-        "next_chapter": next_chapter,  # 下一个推荐章节
-    }
+        chapter_stats = []
+        for ch in chapters:
+            ch_items = [s for s in syllabus if s["chapter_index"] == ch["idx"]]
+            chapter_stats.append({
+                "idx": ch["idx"],
+                "title": ch["title"],
+                "total": len(ch_items),
+                "mastered": sum(1 for s in ch_items if s["status"] == "mastered"),
+                "is_loaded": ch.get("is_loaded", 0),
+            })
+
+        strategy = {"speed": "精华提炼模式", "standard": "系统学习模式", "deep": "辩证分析模式"}
+        pending = [s for s in syllabus if s["status"] == "pending"]
+        weak_areas = [{"id": s["id"], "description": s["description"], "chapter_index": s["chapter_index"], "status": "未掌握"} for s in pending[:5]]
+
+        recommended_order = []
+        for ch in chapters:
+            ch_items = [s for s in syllabus if s["chapter_index"] == ch["idx"]]
+            mastered = sum(1 for s in ch_items if s["status"] == "mastered")
+            total = len(ch_items)
+            if total == 0:
+                continue
+            mastered_ratio = mastered / total if total > 0 else 0
+            if mastered_ratio == 0:
+                priority = "high"
+            elif mastered_ratio < 1:
+                priority = "medium"
+            else:
+                priority = "low"
+            recommended_order.append({"idx": ch["idx"], "title": ch["title"], "priority": priority, "progress": f"{mastered}/{total}", "status": "已完成" if mastered_ratio == 1 else ("进行中" if mastered_ratio > 0 else "未开始")})
+
+        priority_order = {"high": 0, "medium": 1, "low": 2}
+        recommended_order.sort(key=lambda x: (priority_order.get(x["priority"], 3), x["idx"]))
+
+        percent = round(mastered_points / max(total_points, 1) * 100, 1)
+        next_chapter = next((ch for ch in recommended_order if ch["status"] != "已完成"), None)
+
+        if total_points == 0:
+            recommendation = "正在生成分章，请稍候..."
+        elif next_chapter:
+            if percent < 30:
+                recommendation = f"建议从第{next_chapter['idx'] + 1}章「{next_chapter['title']}」开始学习"
+            elif percent < 50:
+                recommendation = f"继续学习第{next_chapter['idx'] + 1}章「{next_chapter['title']}」，完成更多掌握项"
+            elif percent < 100:
+                recommendation = f"还剩{len(pending)}个知识点未完成，继续加油！"
+            else:
+                recommendation = "恭喜！可以申请结业答辩了"
+        else:
+            recommendation = "恭喜！可以申请结业答辩了"
+
+        return {
+            "reading_mode": reading_mode,
+            "strategy_description": strategy.get(reading_mode, strategy["standard"]),
+            "knowledge_coverage": {"total_points": total_points, "mastered_points": mastered_points, "percent": percent},
+            "chapter_stats": chapter_stats,
+            "recommended_order": recommended_order[:5],
+            "weak_areas": weak_areas,
+            "recommendation": recommendation,
+            "next_chapter": next_chapter,
+        }
 
 
 # ==================== 知识快照 API ====================
@@ -1994,8 +2414,16 @@ async def generate_snapshots(course_id: str):
                 content = ch.get("content_slice", "") or ch.get("content_full", "")
                 chapter_list.append((ch["title"], content, {"idx": ch["idx"]}))
             syllabus_items = await generate_speed_read_syllabus(course_id, chapter_list, snapshots)
-            for ch_idx, desc in syllabus_items:
-                db.add_syllabus_item(course_id, ch_idx, desc)
+            if syllabus_items:
+                # 先删旧数据避免重复
+                _sc2 = db.get_conn()
+                try:
+                    _sc2.execute("DELETE FROM syllabus_items WHERE course_id=?", (course_id,))
+                    _sc2.commit()
+                finally:
+                    _sc2.close()
+                for ch_idx, desc in syllabus_items:
+                    db.add_syllabus_item(course_id, ch_idx, desc)
             syllabus_count = len(syllabus_items)
         except Exception as e:
             import logging

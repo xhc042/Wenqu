@@ -122,7 +122,7 @@ class LLMClient:
         try:
             return json.loads(text)
         except (json.JSONDecodeError, KeyError):
-            return {"status": "thinking", "mastered_items": []}
+            return {"status": "thinking", "items": []}
 
     async def generate_title(self, content: str) -> str:
         """为日记/内容生成标题"""

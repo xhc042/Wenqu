@@ -299,7 +299,18 @@ body {
     cursor: pointer;
     transition: var(--transition);
 }
-.chapter-item:hover { transform: translateX(4px); }
+.chapter-item:hover {
+    transform: translateX(4px);
+}
+
+.tag-core {
+    animation: corePulse 2s ease-in-out infinite;
+}
+
+@keyframes corePulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.8; }
+}
 .chapter-item .chapter-index {
     width: 32px; height: 32px;
     background: var(--accent);
