@@ -1047,7 +1047,7 @@ async def extract_chapter_snapshot(text: str, title: str) -> dict:
 
 async def extract_chapter_snapshots_batch(
     chapters: List[Tuple[int, str, str]],
-    concurrency: int = 3,
+    concurrency: int = 2,
     progress_callback=None,
 ) -> Dict[int, dict]:
     """
@@ -1154,6 +1154,7 @@ async def generate_global_highlights(course_id: str, snapshots: list, chapter_ti
         meta_warning = ""
 
     # v1.3 P0-②: prompt 强化"本书独有"原则,避免生成放之四海皆准的泛化模板
+    # v1.x: 去掉 25 字字数限制 + 强化动宾短语（金融/医学等领域实体名常超出 25 字）
     # 注意：如果快照为空或太少，简化 prompt 要求
     if len(snapshots) < 3:
         # 快照太少时，使用简化版 prompt
@@ -1161,7 +1162,12 @@ async def generate_global_highlights(course_id: str, snapshots: list, chapter_ti
 
 {snapshot_text}
 {meta_warning}
-任务1：提炼3-8个最重要的核心知识点（用"能+具体动作"描述，每个不超过25字）
+任务1：提炼3-8个最重要的核心知识点（**用动宾短语描述**）
+   - 动宾短语 = 动词（"能+具体动作"）+ 对象（具体概念/术语/实体）+ 补语（数量/范围/场景，可选）
+   - ✅ 好例子："能列出ETF的5种投资策略"、"能区分主动型与被动型ETF"
+   - ❌ 坏例子："能理解ETF"、"能掌握ETF知识"、"能了解XXX"、"本章讲解XXX"
+   - 不限制字数，对象要列全（如指数全称、术语并列等），但保持精炼
+   - 核心知识点应该告诉读者学完后具体能做什么，而不是泛泛而谈
 任务2：推荐优先学习的章节顺序（**只能推荐正文章节**）
 任务3：标注章节间的关键依赖关系
 任务4：识别全书最核心的3-5个正文章节
@@ -1169,7 +1175,7 @@ async def generate_global_highlights(course_id: str, snapshots: list, chapter_ti
 
 返回严格JSON（不要任何其他文字）：
 {{
-  "key_points": ["知识点1", "知识点2", ...],
+  "key_points": ["动宾短语1", "动宾短语2", ...],
   "chapter_priorities": ["第5章", "第8章", ...],
   "chapter_dependencies": {{"第8章": "第5章"}},
   "core_chapter_indices": ["第5章", "第8章", "第11章"],
@@ -1180,9 +1186,11 @@ async def generate_global_highlights(course_id: str, snapshots: list, chapter_ti
 
 {snapshot_text}
 {meta_warning}
-任务1：提炼5-10个最重要的核心知识点（**用"能+具体动作"描述，每个不超过25字，要具体有参考价值**）
-   - ✅ 好例子："能列出ETF的5种投资策略"、"能解释ETF运作机制"、"能区分主动型与被动型ETF"
+任务1：提炼5-10个最重要的核心知识点（**用动宾短语描述，要具体有参考价值**）
+   - 动宾短语 = 动词（"能+具体动作"）+ 对象（具体概念/术语/实体）+ 补语（数量/范围/场景，可选）
+   - ✅ 好例子："能列出ETF的5种投资策略"、"能解释ETF的运作机制"、"能区分主动型与被动型ETF"
    - ❌ 坏例子："能理解ETF"、"能掌握ETF知识"、"能了解XXX"、"本章讲解XXX"
+   - 不限制字数，对象要列全（如指数全称、术语并列等），但保持精炼不啰嗦
    - 核心知识点应该告诉读者学完后具体能做什么，而不是泛泛而谈
 任务2：推荐优先学习的章节顺序（**只能推荐正文章节，不能是序言/前言/自序/附录**）
 任务3：标注章节间的关键依赖关系（哪些正文章节必须先学）
@@ -1191,7 +1199,7 @@ async def generate_global_highlights(course_id: str, snapshots: list, chapter_ti
 
 返回严格JSON（不要任何其他文字）：
 {{
-  "key_points": ["能+具体动作", "能+具体动作", ...],
+  "key_points": ["动宾短语1", "动宾短语2", ...],
   "chapter_priorities": ["第5章", "第8章", ...],
   "chapter_dependencies": {{"第8章": "第5章"}},
   "core_chapter_indices": ["第5章", "第8章", "第11章", "第14章"],
@@ -1340,10 +1348,11 @@ def _generate_fallback_key_points(snapshots: list, chapter_titles: list, max_poi
                     seen_keywords.add(kw)
                     if len(key_points) >= max_points:
                         break
-        
+
         # 如果有好的观点，也加入
         if viewpoint and len(viewpoint) > 10 and not viewpoint.startswith("本章讲解") and not viewpoint.startswith("了解"):
-            point = f"能理解{viewpoint[:30]}"
+            # v1.x: 不再截断 viewpoint，让兜底知识点也保留完整对象信息
+            point = f"能理解{viewpoint}"
             if point not in key_points:
                 key_points.append(point)
     
@@ -1413,9 +1422,10 @@ def _build_highlights_fallback(snapshots: list, chapter_titles: list) -> dict:
             key_points.append(f"能描述{kw}的核心要点和应用场景")
     
     # 如果有好的核心观点，也加入知识点
+    # v1.x: 不再截断 vp，让 LLM 完全失败场景下也保留完整对象信息（金融/医学等领域实体名长）
     for vp in core_viewpoints[:3]:
         if len(vp) > 10 and vp not in key_points:
-            key_points.append(f"能理解{vp[:30]}")
+            key_points.append(f"能理解{vp}")
 
     # 如果没有有价值的知识点，给一个通用的但有指导性的
     if not key_points:

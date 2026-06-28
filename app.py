@@ -94,7 +94,7 @@ async def _run_speed_mode_postprocess(
     chapter_titles: List[str],
     source_type: str,
     source_path: str,
-    concurrency: int = 3,
+    concurrency: int = 2,
     progress_callback=None,
 ) -> dict:
     """
@@ -604,7 +604,7 @@ async def run_chapter_generation(task_id: str):
             try:
                 result = await _run_speed_mode_postprocess(
                     course_id, chapters, chapter_titles,
-                    source_type, source_path, concurrency=3,
+                    source_type, source_path, concurrency=2,
                     progress_callback=snapshot_progress_cb,
                 )
                 await _persist_speed_results(course_id, result)
@@ -983,7 +983,7 @@ async def generate_chapters(course_id: str):
         try:
             result = await _run_speed_mode_postprocess(
                 course_id, chapters, chapter_titles,
-                source_type, source_path, concurrency=3,
+                source_type, source_path, concurrency=2,
             )
             await _persist_speed_results(course_id, result)
 
@@ -2562,7 +2562,7 @@ async def generate_snapshots(course_id: str):
 
         result = await _run_speed_mode_postprocess(
             course_id, chapter_list, chapter_titles,
-            source_type, source_path, concurrency=3,
+            source_type, source_path, concurrency=2,
         )
         await _persist_speed_results(course_id, result)
 

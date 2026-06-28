@@ -58,6 +58,13 @@ WebSocket /ws
     - 老库自动迁移:`_migrate_schema` 检查字段后 ALTER TABLE
     - 写入端:`_run_speed_mode_postprocess` 按 key_points 排序生成梯度(前30%→5,中间40%→4,后30%→3)
   - `chunker.generate_global_highlights` prompt 强化"本书独有"原则,禁止生成泛化模板
+  - **v1.x：核心知识点 prompt 升级 + 并发收敛**
+    - 去掉 `key_points` 的 25 字字数限制（金融/医学等领域实体名长,截断会丢信息）
+    - prompt 强化"动宾短语"规则（动词+对象+补语,对象要列全）
+    - `extract_chapter_snapshots_batch` 默认 `concurrency` 由 3 → 2（避免瞬时打 LLM 配额）
+    - `_run_speed_mode_postprocess` 默认 `concurrency` 同步收敛到 2
+    - `_generate_fallback_key_points` 不再 `[:30]` 截断 viewpoint（兜底链路也保留完整对象）
+    - `_build_highlights_fallback`（LLM 三次重试全失败后的终极兜底）也不再 `vp[:30]` 截断（与 _generate_fallback_key_points 是两条独立路径,wenqu-reviewer v1.x review 抓到漏改,已修复）
   - `state_machine._get_mastery_hint/_check` 按 importance desc 取,文本含 `[重要度N/5]` 标记
   - SHARE 阶段:优先揭示核心观点,不从基础概念开始
   - PROBE 阶段:必须先攻高重要度知识点,显式禁止停留在基础定义

@@ -3,6 +3,7 @@ P0-② 测试: extract_chapter_snapshots_batch 并发批量生成
 """
 import asyncio
 import time
+import inspect
 import pytest
 from unittest.mock import AsyncMock, patch
 
@@ -146,3 +147,48 @@ async def test_batch_progress_callback_on_failure():
     assert calls[0][0] == 1
     assert calls[1][0] == 2
     assert calls[2][0] == 3
+
+
+# ==================== v1.x: 默认并发 = 2 ====================
+
+
+def test_batch_default_concurrency_is_2():
+    """默认并发从 3 改为 2（业务诉求：避免瞬时高并发打 LLM 配额）"""
+    sig = inspect.signature(extract_chapter_snapshots_batch)
+    assert sig.parameters["concurrency"].default == 2, (
+        f"默认并发应为 2，实际 {sig.parameters['concurrency'].default}"
+    )
+
+
+def test_postprocess_default_concurrency_is_2():
+    """_run_speed_mode_postprocess 默认并发也是 2（保持一致）"""
+    from app import _run_speed_mode_postprocess
+    sig = inspect.signature(_run_speed_mode_postprocess)
+    assert sig.parameters["concurrency"].default == 2
+
+
+@pytest.mark.asyncio
+async def test_batch_default_concurrency_runtime_is_2():
+    """
+    运行时验证：不传 concurrency 时，并发上限确实为 2
+    通过 Semaphore 的 _value 间接观测（注入并发计数 fake）
+    """
+    chapters = [(i, f"章{i}", f"内容{i}") for i in range(6)]
+    in_flight = {"max": 0, "cur": 0}
+
+    async def fake_snap(content, title):
+        in_flight["cur"] += 1
+        in_flight["max"] = max(in_flight["max"], in_flight["cur"])
+        await asyncio.sleep(0.05)
+        in_flight["cur"] -= 1
+        return {"keywords": [title], "importance": 3}
+
+    with patch("chunker.extract_chapter_snapshot", new_callable=AsyncMock) as mock:
+        mock.side_effect = fake_snap
+        # 不传 concurrency → 使用默认值
+        result = await extract_chapter_snapshots_batch(chapters)
+
+    assert len(result) == 6
+    assert in_flight["max"] <= 2, (
+        f"默认 concurrency 应为 2，但实测瞬时并发={in_flight['max']}"
+    )
