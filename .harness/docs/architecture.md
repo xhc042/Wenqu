@@ -61,6 +61,15 @@ WebSocket /ws
   - `state_machine._get_mastery_hint/_check` 按 importance desc 取,文本含 `[重要度N/5]` 标记
   - SHARE 阶段:优先揭示核心观点,不从基础概念开始
   - PROBE 阶段:必须先攻高重要度知识点,显式禁止停留在基础定义
+- **v1.3 P1-任务7：核心触达保险**
+  - `_has_touched_core()`: 检查本章是否触达过 importance≥4 的 syllabus(in_progress/mastered)
+  - `_force_core_probe()`: 在 min_rounds 边界,若未触达核心 → 强制 PROBE 1 次
+  - `_core_probe_attempted` 标记:防止强制 probe 无限循环(每章节最多 1 次)
+  - 边界场景:
+    - 已触达核心 → 正常结束
+    - 未触达 + 未尝试 → 强制 PROBE 一次后判断
+    - 未触达 + 已尝试 → 正常结束(不无限循环)
+    - 进心流 → 不结束,正常走 PROBE
 - **事务包装**：`_persist_speed_results` 使用 SQLite 事务确保数据一致性(修复 v1.1 第二轮审查 P1-②)
   - 三步写入(快照→精华→掌握项)在同一事务中
   - 任何步骤失败自动回滚，不会写入部分数据

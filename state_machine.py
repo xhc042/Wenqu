@@ -84,6 +84,8 @@ class DialogueStateMachine:
         self.flow_extend_count = 0
         self.consecutive_stuck = 0
         self.consecutive_thinking = 0
+        # v1.3 P1-任务7: 强制核心 probe 标记,确保每章节最多触发一次,防止无限循环
+        self._core_probe_attempted = False
         self.started_at = None
 
         # 对话上下文
@@ -488,9 +490,63 @@ class DialogueStateMachine:
                 yield chunk
 
         # 检测是否应该结束
+        # v1.3 P1-任务7: 在结束前加一道核心触达保险
+        # 若还没碰过 importance≥4 知识点,强制 PROBE 一次(只触发一次,防止无限循环)
         if not self.is_flow_state and self.current_round >= self._get_min_rounds():
-            async for chunk in self._end_session("达到最小时长"):
-                yield chunk
+            if not self._has_touched_core() and not self._core_probe_attempted:
+                # 还没碰核心 → 强制 PROBE
+                self._core_probe_attempted = True
+                force_prompt = self._force_core_probe()
+                if force_prompt:
+                    self.messages.append({"role": "user", "content": force_prompt})
+                    async for chunk in self._probe():
+                        yield chunk
+                    # 强制 probe 完一轮后再判断
+                    if not self._has_touched_core():
+                        # 还是没触达 → 正常结束(不再强制,避免死循环)
+                        async for chunk in self._end_session("达到最小时长（核心未触达）"):
+                            yield chunk
+                else:
+                    # 没 pending 项可问 → 正常结束
+                    async for chunk in self._end_session("达到最小时长"):
+                        yield chunk
+            else:
+                async for chunk in self._end_session("达到最小时长"):
+                    yield chunk
+
+    def _has_touched_core(self) -> bool:
+        """v1.3 P1-任务7: 检查本章节是否已触达 importance ≥4 的 syllabus
+
+        触达定义：状态变为 in_progress 或 mastered
+        用于在 _get_min_rounds 边界强制 PROBE 一次,确保用户没白上这节课
+        """
+        chapter_items = [s for s in self.syllabus_items
+                        if s["chapter_index"] == self.chapter_index]
+        return any(
+            s.get("importance", 0) >= 4
+            and s["status"] in ("in_progress", "mastered")
+            for s in chapter_items
+        )
+
+    def _force_core_probe(self) -> str:
+        """v1.3 P1-任务7: 构造强制 PROBE 的 prompt,要求 LLM 必须问核心知识点"""
+        # 取本章最高 importance 的 pending 项
+        chapter_pending = sorted(
+            [s for s in self.syllabus_items
+             if s["chapter_index"] == self.chapter_index
+             and s["status"] == "pending"],
+            key=lambda x: x.get("importance", 0),
+            reverse=True,
+        )
+        if not chapter_pending:
+            return ""
+        top = chapter_pending[0]
+        return (
+            f"⚠️ 重要提示：本节课即将结束，但你还没学过本章最重要的知识点。"
+            f"请围绕以下核心知识点提问（必须问这一条，不能换其他）：\n"
+            f"- [重要度{top.get('importance', 0)}/5] {top['description']}\n"
+            f"问题必须聚焦该核心知识点，不要停留在基础概念。"
+        )
 
     def _check_flow_state(self, user_text: str):
         """心流检测
