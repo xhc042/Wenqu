@@ -113,15 +113,27 @@ class LLMClient:
                 return "⚠️ 网络好像有点问题"
 
     async def chat_json(self, messages: List[dict], temperature: float = 0.3) -> dict:
-        """非流式对话，返回JSON对象"""
+        """
+        非流式对话，返回 JSON 对象或降级结构。
+        - 正常：返回 LLM 的 JSON object（推荐格式）
+        - 数组：LLM 返回纯数组时，包装为 {"status": "thinking", "items": [...]}
+        - 失败：响应为空 / ⚠️ 前缀 / 解析错误时，返回 {"status": "thinking", "items": []}
+        注意：不使用 response_format 参数（DeepSeek 对 json_object 模式支持不稳定），
+        改为在 system prompt 中要求严格返回纯 JSON。
+        """
         text = await self.chat(
             messages=messages,
             temperature=temperature,
-            response_format={"type": "json_object"},
         )
+        if not text or text.startswith("⚠️"):
+            return {"status": "thinking", "items": []}
         try:
-            return json.loads(text)
-        except (json.JSONDecodeError, KeyError):
+            result = json.loads(text)
+            # 防御：LLM 有时会返回纯数组而非 JSON 对象
+            if isinstance(result, list):
+                return {"status": "thinking", "items": result}
+            return result
+        except json.JSONDecodeError:
             return {"status": "thinking", "items": []}
 
     async def generate_title(self, content: str) -> str:

@@ -95,6 +95,7 @@ async def _run_speed_mode_postprocess(
     source_type: str,
     source_path: str,
     concurrency: int = 3,
+    progress_callback=None,
 ) -> dict:
     """
     speed 模式后处理（修复 P0-①：消除 3 处重复代码）
@@ -161,6 +162,7 @@ async def _run_speed_mode_postprocess(
         try:
             snapshot_by_idx = await extract_chapter_snapshots_batch(
                 chapters_for_snapshot, concurrency=concurrency,
+                progress_callback=progress_callback,
             )
         except Exception as e:
             logger.warning(f"[speed] 批量快照失败，回退串行: {e}")
@@ -168,7 +170,8 @@ async def _run_speed_mode_postprocess(
 
         if not snapshot_by_idx:
             # 回退：同步串行
-            for ch_idx, title, snapshot_content in chapters_for_snapshot:
+            total = len(chapters_for_snapshot)
+            for i, (ch_idx, title, snapshot_content) in enumerate(chapters_for_snapshot):
                 if not snapshot_content:
                     continue
                 try:
@@ -176,18 +179,22 @@ async def _run_speed_mode_postprocess(
                     snapshot_by_idx[ch_idx] = snap
                 except Exception as e:
                     logger.warning(f"[speed] 串行快照失败 [{title[:20]}]: {e}")
+                if progress_callback:
+                    progress_callback(i + 1, total, title)
     else:
         # 非 EPUB：用 chapters 里的 content
         try:
             snapshot_by_idx = await extract_chapter_snapshots_batch(
                 chapter_data, concurrency=concurrency,
+                progress_callback=progress_callback,
             )
         except Exception as e:
             logger.warning(f"[speed] 批量快照失败，回退串行: {e}")
             snapshot_by_idx = {}
 
         if not snapshot_by_idx:
-            for ch_idx, title, content in chapter_data:
+            total = len(chapter_data)
+            for i, (ch_idx, title, content) in enumerate(chapter_data):
                 if not content:
                     continue
                 try:
@@ -195,6 +202,8 @@ async def _run_speed_mode_postprocess(
                     snapshot_by_idx[ch_idx] = snap
                 except Exception as e:
                     logger.warning(f"[speed] 串行快照失败 [{title[:20]}]: {e}")
+                if progress_callback:
+                    progress_callback(i + 1, total, title)
 
     snapshots = list(snapshot_by_idx.values())
 
@@ -507,17 +516,22 @@ async def create_chapter_generation_task(data: dict):
         raise HTTPException(400, "缺少course_id")
     
     task_id = str(uuid.uuid4())[:8]
+    # speed 模式有 4 步（含快照步），其他模式 3 步
+    is_speed_task = data.get("reading_mode") == "speed"
+    steps = [
+        {"name": "正在智能分章...", "status": "pending", "detail": ""},
+        {"name": "生成知识快照", "status": "pending", "detail": ""} if is_speed_task else {"name": "生成教学大纲", "status": "pending", "detail": ""},
+        {"name": "生成教学大纲", "status": "pending", "detail": ""} if is_speed_task else None,
+        {"name": "完成", "status": "pending", "detail": ""},
+    ]
+    steps = [s for s in steps if s is not None]
     async_tasks[task_id] = {
         "task_id": task_id,
         "course_id": course_id,
         "type": "chapters_generate",
         "status": TASK_STATUS["PENDING"],
         "progress": 0,
-        "steps": [
-            {"name": "正在智能分章...", "status": "pending", "detail": ""},
-            {"name": "生成教学大纲", "status": "pending", "detail": ""},
-            {"name": "完成", "status": "pending", "detail": ""},
-        ],
+        "steps": steps,
         "current_step": 0,
         "result": None,
         "error": None,
@@ -552,7 +566,8 @@ async def run_chapter_generation(task_id: str):
         is_speed = reading_mode == "speed"
         
         # 步骤1: 智能分章
-        task["steps"][0]["detail"] = "正在分析文本结构..."
+        task["steps"][0]["detail"] = "正在读取文件内容..."
+        task["progress"] = 5
         actual_type = source_type
         if source_type == "text":
             actual_type = "txt"
@@ -561,38 +576,57 @@ async def run_chapter_generation(task_id: str):
         if not text:
             raise Exception("无法提取文本内容")
         
-        task["steps"][0]["detail"] = "正在智能分章..."
+        task["steps"][0]["detail"] = "正在分析文本结构..."
+        task["progress"] = 10
         chapters = await smart_chunk(text, source_type=source_type, file_path=source_path if source_type == "epub" else "", reading_mode=reading_mode)
         task["steps"][0]["status"] = "done"
         task["steps"][0]["detail"] = f"分章完成，共{len(chapters)}章"
-        task["progress"] = 30
+        task["progress"] = 20
         
         # 保存章节到数据库（使用统一函数）
         chapter_titles = _save_chapters_to_db(course_id, chapters, reading_mode)
         
         db.add_learning_event(course_id, "lesson_end", {"action": "chapters_generated", "count": len(chapters)})
         
-        # 速读模式额外处理（P0-①：抽离为独立函数，3 处复用同一份逻辑）
+        # 速读模式额外处理：步骤1=快照，步骤2=大纲
         if is_speed:
-            task["steps"][0]["detail"] = "正在生成知识快照..."
+            task["steps"][1]["status"] = "processing"
+            task["current_step"] = 1
+            task["steps"][1]["detail"] = "正在生成知识快照..."
+            task["progress"] = 25
+            
+            def snapshot_progress_cb(current, total, title):
+                pct = 25 + int((current / total) * 45)
+                short_title = title[:15] + "..." if len(title) > 15 else title
+                task["steps"][1]["detail"] = f"[{current}/{total}] {short_title}"
+                task["progress"] = pct
+            
             try:
                 result = await _run_speed_mode_postprocess(
                     course_id, chapters, chapter_titles,
                     source_type, source_path, concurrency=3,
+                    progress_callback=snapshot_progress_cb,
                 )
                 await _persist_speed_results(course_id, result)
-                task["steps"][0]["detail"] = (
-                    f"快照 {len(result['snapshots'])} 章，"
-                    f"掌握项 {len(result['syllabus_items'])} 条"
-                )
+                task["steps"][1]["status"] = "done"
+                task["steps"][1]["detail"] = f"快照 {len(result['snapshots'])} 章完成"
+                task["progress"] = 70
             except Exception as e:
                 import logging
                 logging.warning(f"速读模式快照生成失败: {e}")
-        
-        task["progress"] = 50
-        
-        # 步骤2: 生成教学大纲（非速读模式）
-        if reading_mode != "speed":
+                task["steps"][1]["status"] = "done"
+                task["steps"][1]["detail"] = "快照生成跳过"
+                task["progress"] = 70
+                result = {"snapshots": [], "syllabus_items": []}  # 异常时兜底
+            else:
+                # result 只在 try 成功时绑定到这里，保证后续引用不炸
+                pass
+
+            # 速读模式大纲（步骤2）
+            task["steps"][2]["status"] = "done"
+            task["steps"][2]["detail"] = f"掌握项 {len(result.get('syllabus_items', []))} 条完成"
+        else:
+            # 非速读模式：生成教学大纲
             task["steps"][1]["status"] = "processing"
             task["current_step"] = 1
             task["steps"][1]["detail"] = "正在生成掌握项..."
@@ -601,7 +635,6 @@ async def run_chapter_generation(task_id: str):
             ch_list = [(ch["title"], ch.get("content_slice", "")) for ch in chapters_db if ch.get("is_loaded", 1)]
             
             if ch_list:
-                # 先删除旧知识点，防止重复追加（任务重跑时避免叠加）
                 _conn = db.get_conn()
                 try:
                     _conn.execute("DELETE FROM syllabus_items WHERE course_id=?", (course_id,))
@@ -609,24 +642,24 @@ async def run_chapter_generation(task_id: str):
                 finally:
                     _conn.close()
 
+                def progress_cb(current, total, message):
+                    task["steps"][1]["detail"] = message
+                    task["progress"] = 50 + int((current / total) * 30)
+
                 try:
-                    items = await generate_syllabus_items(course_id, ch_list)
+                    items = await generate_syllabus_items(course_id, ch_list, progress_callback=progress_cb)
                     if items:
                         for chapter_index, description in items:
                             db.add_syllabus_item(course_id, chapter_index, description)
                         task["steps"][1]["status"] = "done"
                         task["steps"][1]["detail"] = f"大纲生成完成，共{len(items)}个掌握项"
                     else:
-                        # LLM返回空，使用默认掌握项
-                        import logging
-                        logging.warning(f"[异步任务 {task_id}] LLM返回空掌握项，使用默认值")
                         _add_default_syllabus_items(course_id, ch_list)
                         task["steps"][1]["status"] = "done"
                         task["steps"][1]["detail"] = "大纲生成完成（使用默认项）"
                 except Exception as e:
                     import logging
                     logging.error(f"[异步任务 {task_id}] 掌握项生成失败: {e}", exc_info=True)
-                    # 失败时使用默认掌握项确保课程可用
                     _add_default_syllabus_items(course_id, ch_list)
                     task["steps"][1]["status"] = "done"
                     task["steps"][1]["detail"] = "大纲生成完成（使用默认项）"
@@ -635,16 +668,11 @@ async def run_chapter_generation(task_id: str):
                 task["steps"][1]["detail"] = "无已加载章节"
             
             task["progress"] = 80
-        else:
-            task["steps"][1]["status"] = "done"
-            task["steps"][1]["detail"] = "速读模式跳过"
-            task["progress"] = 80
         
-        # 步骤3: 完成
-        task["steps"][2]["status"] = "done"
-        task["steps"][2]["detail"] = "全部完成"
-        task["status"] = TASK_STATUS["COMPLETED"]
         task["progress"] = 100
+        task["status"] = TASK_STATUS["COMPLETED"]
+        task["steps"][-1]["status"] = "done"
+        task["steps"][-1]["detail"] = "全部完成"
         
     except Exception as e:
         import logging

@@ -94,7 +94,7 @@ async def test_speed_syllabus_fallback_to_learning_goal(monkeypatch):
     ]
     chapter_titles = ["第1章"]
 
-    async def fake_batch(chs, concurrency=3):
+    async def fake_batch(chs, concurrency=3, progress_callback=None):
         return {0: {
             "keywords": ["A"],
             "core_viewpoint": "观点",
@@ -134,7 +134,7 @@ async def test_speed_syllabus_exception_isolated(monkeypatch):
     chapters = [("第1章", "内容1", {"idx": 0})]
     chapter_titles = ["第1章"]
 
-    async def fake_batch(chs, concurrency=3):
+    async def fake_batch(chs, concurrency=3, progress_callback=None):
         return {0: {
             "keywords": ["A"],
             "core_viewpoint": "观点",
@@ -345,3 +345,106 @@ async def test_persist_speed_results_partial_failure_rollback(monkeypatch, tmp_p
         # 如果确实触发了回滚，应该抛出异常
         # 这表示事务机制正常工作
         pass
+@pytest.mark.asyncio
+async def test_speed_postprocess_passes_callback_to_batch(monkeypatch):
+    """
+    验证：_run_speed_mode_postprocess 把 progress_callback 透传给 extract_chapter_snapshots_batch
+    """
+    import app
+    from app import _run_speed_mode_postprocess
+
+    chapters = [("第1章", "内容1", {"idx": 0})]
+    chapter_titles = ["第1章"]
+    callback_calls = []
+
+    def progress_cb(current, total, title):
+        callback_calls.append((current, total, title))
+
+    async def fake_batch(chs, concurrency=3, progress_callback=None):
+        # 验证回调被传入
+        assert progress_callback is not None, "progress_callback 未透传给 batch"
+        # 模拟触发一次回调
+        progress_callback(1, 1, "第1章")
+        return {0: {
+            "keywords": ["A"],
+            "core_viewpoint": "观点",
+            "importance": 3,
+            "learning_goal": "能理解A",
+            "difficulty": "中等",
+        }}
+
+    async def fake_highlights_fn(course_id, snaps, titles):
+        return {"key_points": [], "chapter_priorities": [], "relationships": "", "core_chapter_indices": [], "chapter_dependencies": {}}
+
+    async def fake_syllabus_fn(course_id, chs, snaps):
+        return []
+
+    with patch("app.extract_chapter_snapshots_batch", new_callable=AsyncMock) as mock_batch, \
+         patch("app.generate_global_highlights", new_callable=AsyncMock) as mock_high, \
+         patch("app.generate_speed_read_syllabus", new_callable=AsyncMock, create=True) as mock_syll:
+        mock_batch.side_effect = fake_batch
+        mock_high.side_effect = fake_highlights_fn
+        mock_syll.side_effect = fake_syllabus_fn
+
+        result = await _run_speed_mode_postprocess(
+            "test", chapters, chapter_titles, "text", "",
+            progress_callback=progress_cb,
+        )
+
+    # 验证回调被触发
+    assert len(callback_calls) == 1
+    assert callback_calls[0] == (1, 1, "第1章")
+
+
+@pytest.mark.asyncio
+async def test_speed_postprocess_serial_fallback_also_calls_callback(monkeypatch):
+    """
+    验证：批量全失败回退到串行时，progress_callback 仍被触发
+    """
+    import app
+    from app import _run_speed_mode_postprocess
+
+    chapters = [("第1章", "内容1", {"idx": 0}), ("第2章", "内容2", {"idx": 1})]
+    chapter_titles = ["第1章", "第2章"]
+    callback_calls = []
+
+    def progress_cb(current, total, title):
+        callback_calls.append((current, total, title))
+
+    async def fake_batch(chs, concurrency=3, progress_callback=None):
+        # 模拟批量全失败
+        return {}
+
+    async def fake_snap(content, title):
+        return {
+            "keywords": ["K"],
+            "core_viewpoint": "观点",
+            "importance": 3,
+            "learning_goal": "能理解K",
+            "difficulty": "中等",
+        }
+
+    async def fake_highlights_fn(course_id, snaps, titles):
+        return {"key_points": [], "chapter_priorities": [], "relationships": "", "core_chapter_indices": [], "chapter_dependencies": {}}
+
+    async def fake_syllabus_fn(course_id, chs, snaps):
+        return []
+
+    with patch("app.extract_chapter_snapshots_batch", new_callable=AsyncMock) as mock_batch, \
+         patch("app.extract_chapter_snapshot", new_callable=AsyncMock) as mock_snap, \
+         patch("app.generate_global_highlights", new_callable=AsyncMock) as mock_high, \
+         patch("app.generate_speed_read_syllabus", new_callable=AsyncMock, create=True) as mock_syll:
+        mock_batch.side_effect = fake_batch
+        mock_snap.side_effect = fake_snap
+        mock_high.side_effect = fake_highlights_fn
+        mock_syll.side_effect = fake_syllabus_fn
+
+        result = await _run_speed_mode_postprocess(
+            "test", chapters, chapter_titles, "text", "",
+            progress_callback=progress_cb,
+        )
+
+    # 串行 fallback 时每章触发一次回调
+    assert len(callback_calls) == 2
+    assert callback_calls[0] == (1, 2, "第1章")
+    assert callback_calls[1] == (2, 2, "第2章")

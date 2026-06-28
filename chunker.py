@@ -934,7 +934,7 @@ async def extract_chapter_snapshot(text: str, title: str) -> dict:
 返回严格JSON（不要任何其他内容）：
 {{"keywords": ["关键词1", "关键词2"], "core_viewpoint": "一句话观点", "learning_goal": "能+具体动作", "importance": 3, "difficulty": "中等"}}"""
 
-    # 重试机制：最多3次（使用 llm 单例，与对话学习保持一致）
+    # 重试机制：最多3次，每次失败后等 2 秒再试（给 API 恢复时间）
     last_error = None
     for attempt in range(3):
         try:
@@ -944,10 +944,15 @@ async def extract_chapter_snapshot(text: str, title: str) -> dict:
             ], temperature=0.3)
 
             # 字段解析与验证
-            keywords = result.get("keywords", [])
-            if not isinstance(keywords, list):
+            # 防御：chat_json 可能返回 {"status": "thinking", "items": [...]}（LLM返回数组）
+            raw_keywords = result.get("keywords", [])
+            if not raw_keywords and result.get("status") == "thinking":
+                # LLM 返回了纯数组，chat_json 包装成 {"status": "thinking", "items": [...]}
+                raw_keywords = result.get("items", [])
+            if isinstance(raw_keywords, list):
+                keywords = [str(k) for k in raw_keywords[:5] if k]
+            else:
                 keywords = []
-            keywords = [str(k) for k in keywords[:5] if k]  # 过滤空值
 
             core_viewpoint = str(result.get("core_viewpoint", ""))[:100]
             learning_goal = str(result.get("learning_goal", ""))[:80]
@@ -955,7 +960,10 @@ async def extract_chapter_snapshot(text: str, title: str) -> dict:
             importance = result.get("importance", 3)
             if not isinstance(importance, (int, float)):
                 importance = 3
-            importance = max(1, min(5, int(importance)))
+            try:
+                importance = max(1, min(5, int(importance)))
+            except (ValueError, TypeError):
+                importance = 3
 
             # 元数据章节（序言/前言/自序等）强制 importance <= 2
             if is_meta:
@@ -985,45 +993,52 @@ async def extract_chapter_snapshot(text: str, title: str) -> dict:
         except Exception as e:
             last_error = f"LLM调用失败: {e}"
             import logging
-            logging.warning(f"快照生成第{attempt+1}次尝试失败 [{title[:20]}]: {e}")
+            logger2 = logging.getLogger(__name__)
+            logger2.warning(f"快照生成第{attempt+1}次尝试失败 [{title[:20]}]: {e}")
+
+        # 失败后等待再重试（给 API 恢复时间）
+        if attempt < 2:  # 前两次失败后等待，第3次是最后一次
+            await asyncio.sleep(2.0)
 
     # 全部失败：使用文本回退（确保有内容而不是空）
     import logging
-    logging.error(f"快照生成最终失败 [{title[:20]}]: {last_error}")
+    logger = logging.getLogger(__name__)
+    logger.warning(f"快照生成 LLM 失败 [{title[:20]}]，使用文本回退: {last_error}")
 
-    # 从文本中提取前几个词作为关键词（兜底）
+    # 从文本中提取关键词（兜底）
     fallback_keywords = _extract_keywords_fallback(text, title)
-    
-    # 改进的兜底内容：基于实际文本内容生成，不再是死板模板
-    # 提取首段前100字作为内容摘要
-    first_sentences = []
-    for para in text.split('\n\n')[:3]:
-        para = para.strip()
-        if para:
-            # 取前2-3个句子
-            sentences = _re.split(r'[。.!！？\n]', para)
-            for s in sentences[:3]:
-                s = s.strip()
-                if 10 <= len(s) <= 100:
-                    first_sentences.append(s)
-            if first_sentences:
+
+    # 从文本中提取有意义的句子作为核心观点
+    # 策略：找包含专业术语或数字的长句
+    sentences = _re.split(r'[。.!！?？\n]', text)
+    best_sentence = ""
+    for s in sentences:
+        s = s.strip()
+        # 优先选择包含2-4字专业词、长度适中的句子
+        cn_words = _re.findall(r'[\u4e00-\u9fa5]{2,4}', s)
+        if 60 <= len(s) <= 150 and len(cn_words) >= 3:
+            best_sentence = s
+            break
+    if not best_sentence:
+        # 兜底：取第一段
+        for para in text.split('\n\n')[:2]:
+            para = para.strip()
+            if para and len(para) > 20:
+                best_sentence = para[:120]
                 break
-    
-    content_summary = first_sentences[0][:80] if first_sentences else ""
-    
-    # 基于实际内容生成更有价值的核心观点和学习目标
-    if content_summary:
-        improved_core_viewpoint = content_summary[:50]
-        improved_learning_goal = f"能理解{title}中关于{fallback_keywords[0] if fallback_keywords else '核心概念'}的主要内容"
-    else:
-        # 最后的兜底：尽量给出有意义的描述
-        improved_core_viewpoint = f"探讨{title}相关主题"
-        improved_learning_goal = f"能概述{title}的主要内容和观点"
-    
+
+    # 生成具体的 core_viewpoint（截取有意义的文本片段）
+    core_viewpoint = best_sentence[:80].strip() if best_sentence else f"本章介绍{title}"
+
+    # 生成具体的 learning_goal（从文本中提取章节主题词）
+    topic_terms = [w for w in fallback_keywords[:2] if w and len(w) >= 2]
+    topic_str = "、".join(topic_terms) if topic_terms else "主要内容"
+    learning_goal = f"能列举{title}中的关键要点和{topic_str}"
+
     return {
         "keywords": fallback_keywords,
-        "core_viewpoint": improved_core_viewpoint,
-        "learning_goal": improved_learning_goal,
+        "core_viewpoint": core_viewpoint,
+        "learning_goal": learning_goal,
         "importance": 3,
         "difficulty": "中等",
         "_fallback": True,  # 标记为兜底数据
@@ -1033,20 +1048,22 @@ async def extract_chapter_snapshot(text: str, title: str) -> dict:
 async def extract_chapter_snapshots_batch(
     chapters: List[Tuple[int, str, str]],
     concurrency: int = 3,
+    progress_callback=None,
 ) -> Dict[int, dict]:
     """
-    并发生成多个章节的快照（修复 P0-②）
+    并发生成多个章节的快照
 
-    50 章串行 ≈ 150s → 并发 3 ≈ 50s
     - 输入：[(chapter_idx, title, content), ...]
     - 输出：{chapter_idx: snapshot}
     - 失败隔离：单章失败不影响其他章
-    - 顺序保证：gather 返回 (idx, snap) 元组，按 idx 索引
+    - progress_callback(current, total, title): 每章完成时调用，精度为"每批完成"
     """
     import logging
     logger = logging.getLogger(__name__)
 
     sem = asyncio.Semaphore(concurrency)
+    total = len(chapters)
+    done_count = 0
 
     async def _gen(idx: int, title: str, content: str):
         async with sem:
@@ -1058,16 +1075,26 @@ async def extract_chapter_snapshots_batch(
                 return idx, None
 
     tasks = [_gen(idx, title, content) for idx, title, content in chapters]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    # 用 as_completed 实现"每批完成时回调"精度
+    as_completed_iter = asyncio.as_completed(tasks)
 
     out: Dict[int, dict] = {}
-    for r in results:
+    for fut in as_completed_iter:
+        try:
+            r = await fut
+        except Exception as e:
+            logger.warning(f"[speed] gather 异常: {e}")
+            continue
         if isinstance(r, Exception):
             logger.warning(f"[speed] gather 异常: {r}")
             continue
         idx, snap = r
         if snap:
             out[idx] = snap
+        done_count += 1
+        if progress_callback:
+            progress_callback(done_count, total, chapters[idx][1] if idx < len(chapters) else "")
+
     return out
 
 
@@ -1437,12 +1464,22 @@ def sample_chapter_fairly(text: str, target_chars: int = 5000) -> str:
 
 # ==================== 掌握项生成（支持分级） ====================
 
-async def generate_syllabus_items(course_id: str, chapters: list) -> list:
+async def generate_syllabus_items(
+    course_id: str,
+    chapters: list,
+    progress_callback=None,
+) -> list:
     """
-    为每个章节生成 1~3 条掌握项
+    为每个章节生成 1~3 条掌握项（批量处理加速）
+    
+    优化：每批 5 章合并为一次 LLM 调用，减少调用次数
+    progress_callback(chapter_idx, total_chapters, message) 可选，用于进度更新
     返回 [(chapter_index, description), ...]
     """
     all_items = []
+    
+    # 预处理章节列表
+    chapter_data = []
     for idx, item in enumerate(chapters):
         if isinstance(item, tuple) and len(item) >= 2:
             ch_title, ch_content = item[0], item[1]
@@ -1451,17 +1488,34 @@ async def generate_syllabus_items(course_id: str, chapters: list) -> list:
             ch_content = item.get("content_slice", item.get("content", ""))
         else:
             continue
+        chapter_data.append((idx, ch_title, ch_content[:1500]))
+    
+    total_chapters = len(chapter_data)
+    BATCH_SIZE = 5  # 每批处理章节数
+    
+    # 分批处理
+    for batch_start in range(0, total_chapters, BATCH_SIZE):
+        batch_end = min(batch_start + BATCH_SIZE, total_chapters)
+        batch = chapter_data[batch_start:batch_end]
+        
+        # 构建批量 prompt
+        chapters_section = "\n\n".join([
+            f"【章节 {idx+1}】{title}\n内容：{content[:500]}"
+            for idx, title, content in batch
+        ])
+        
+        prompt = f"""根据以下教材章节内容，为每个章节生成 1~3 条掌握项清单。
 
-        prompt = f"""根据以下教材章节内容，生成1-3条掌握项清单（检查学习者是否真正掌握了该章节的关键知识点）。
+要求：每条掌握项以"能..."开头，使用可验证的行为描述。
 
-每条掌握项以"能..."开头，使用可验证的行为描述。
+{chapters_section}
 
-章节标题：{ch_title}
-章节内容：
-{ch_content[:1500]}
-
-返回JSON格式：
-{{"items": ["能用自己的话复述...", "能解释...", ...]}}
+返回JSON格式（严格按顺序返回所有章节的掌握项）：
+{{"items": [
+    {{"chapter": 1, "description": "能用自己的话复述..."}},
+    {{"chapter": 1, "description": "能解释..."}},
+    {{"chapter": 2, "description": "能..."}}
+]}}
 """
         try:
             result = await llm.chat_json([
@@ -1469,16 +1523,26 @@ async def generate_syllabus_items(course_id: str, chapters: list) -> list:
                 {"role": "user", "content": prompt},
             ])
             items = result.get("items", [])
-            for item_text in items:
-                all_items.append((idx, item_text))
+            for item_obj in items:
+                ch_num = item_obj.get("chapter", 1) - 1  # 转为 0 索引
+                desc = item_obj.get("description", "")
+                if 0 <= ch_num < len(batch):
+                    actual_idx = batch[ch_num][0]
+                    all_items.append((actual_idx, desc))
         except Exception:
-            defaults = [
-                f"能用自己的话复述{ch_title}的核心内容",
-                f"能解释{ch_title}中的关键概念",
-            ]
-            for d in defaults:
-                all_items.append((idx, d))
-
+            # 批量失败时回退到默认项
+            for idx, title, _ in batch:
+                defaults = [
+                    f"能用自己的话复述{title}的核心内容",
+                    f"能解释{title}中的关键概念",
+                ]
+                for d in defaults:
+                    all_items.append((idx, d))
+        
+        # 更新进度
+        if progress_callback:
+            progress_callback(batch_end, total_chapters, f"正在生成掌握项... ({batch_end}/{total_chapters})")
+    
     return all_items
 
 
