@@ -68,11 +68,15 @@ def _utc_list(items, field):
 
 
 def _get_course_group_chats(course_id: str) -> list:
-    """获取课程所有群聊记录（按课程ID查询）"""
+    """获取课程所有群聊记录（按课程ID查询）
+
+    v1.3.1 修复: sessions 表的列名是 started_at(不是 created_at),
+              原 SQL 会导致 sqlite3.OperationalError: no such column: s.created_at
+    """
     conn = db.get_conn()
     try:
         rows = conn.execute(
-            "SELECT gc.*, s.chapter_index, s.created_at as session_created_at "
+            "SELECT gc.*, s.chapter_index, s.started_at as session_created_at "
             "FROM group_chats gc "
             "LEFT JOIN sessions s ON gc.session_id = s.id "
             "WHERE gc.course_id=? "
