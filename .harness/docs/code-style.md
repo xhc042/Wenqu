@@ -61,6 +61,12 @@ asyncio.create_task(run_chapter_generation(task_id))
 - 写操作包 `try/except`,失败 `logger.warning`
 - 复杂查询抽到 `database.py`,不写在路由里
 - 涉及 schema 变更先和 db-migrator rein 对齐
+- **中文环境编码规范**(v1.1 第二轮审查新增)：
+  - 所有文件读写必须显式指定 `encoding="utf-8"`
+  - 数据库操作使用参数化查询(`?` 占位符),禁止字符串拼接中文
+  - 日志输出使用 `ensure_ascii=False`
+  - 统一 UTF-8,禁止 gbk/gb2312/big5 等本地编码
+  - 详见 `.harness/reins/developer/agent.md` "中文环境编码规范" 条目
 
 ## Prompt
 

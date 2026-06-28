@@ -13,6 +13,7 @@
     --success: #00b894;
     --warning: #fdcb6e;
     --danger: #e17055;
+    --info: #0984e3;
     --border: #dfe6e9;
     --shadow: 0 2px 8px rgba(0,0,0,0.08);
     --radius: 12px;
@@ -964,6 +965,8 @@ body {
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 .toast.success { background: var(--success); }
 .toast.error { background: var(--danger); }
+.toast.warning { background: var(--warning); color: #333; }
+.toast.info { background: var(--info); }
 
 /* ==================== 响应式 ==================== */
 @media (max-width: 768px) {

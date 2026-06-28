@@ -245,6 +245,13 @@ function startTaskPolling(taskId) {
             }
         } catch (e) {
             console.warn('轮询任务状态失败:', e);
+            // 404 表示任务已完成并从内存清理，视为成功结束
+            if (e.status === 404 || e.code === 404) {
+                clearInterval(currentTaskPollingInterval);
+                currentTaskPollingInterval = null;
+                window.currentTaskId = null;
+                hideProgressOverlay();
+            }
         }
     };
     
@@ -675,6 +682,17 @@ function startBackgroundTaskPolling(taskId, courseId) {
             setTimeout(poll, 2000);
         } catch (e) {
             console.warn('轮询任务状态失败:', e);
+            // 404 表示任务已完成并从内存清理，视为成功结束
+            if (e.status === 404 || e.code === 404) {
+                hideNonBlockingProgress();
+                // 刷新课程数据
+                try {
+                    const data = await API.get(`/api/courses/${courseId}`);
+                    renderCourseUI(data.course, data);
+                    showToast('✅ 分章和大纲生成完成！', 'success');
+                } catch {}
+                return;
+            }
             pollCount++;
             setTimeout(poll, 2000);
         }
@@ -2370,7 +2388,11 @@ function renderPostClass(data) {
             </div>`
         ).join('');
     } else {
-        diaryDiv.innerHTML = '<div style="color:#636e72;font-size:13px;padding:12px;text-align:center">暂无日记</div>';
+        diaryDiv.innerHTML = `<div style="color:#636e72;font-size:13px;padding:20px;text-align:center">
+            <div style="font-size:32px;margin-bottom:8px">📝</div>
+            <div>暂无日记</div>
+            <div style="font-size:11px;margin-top:4px">完成对话学习后自动生成学习日记</div>
+        </div>`;
     }
 
     // 群聊
@@ -2389,7 +2411,11 @@ function renderPostClass(data) {
             </div>`;
         }).join('');
     } else {
-        chatDiv.innerHTML = '<div style="color:#636e72;font-size:13px;padding:12px;text-align:center">暂无群聊记录</div>';
+        chatDiv.innerHTML = `<div style="color:#636e72;font-size:13px;padding:20px;text-align:center">
+            <div style="font-size:32px;margin-bottom:8px">💬</div>
+            <div>暂无群聊记录</div>
+            <div style="font-size:11px;margin-top:4px">完成对话学习后，其他教师会对你的表现进行点评</div>
+        </div>`;
     }
 
     // 总结
@@ -2405,7 +2431,11 @@ function renderPostClass(data) {
             </div>`
         ).join('');
     } else {
-        sumDiv.innerHTML = '<div style="color:#636e72;font-size:13px;padding:12px;text-align:center">暂无复习总结</div>';
+        sumDiv.innerHTML = `<div style="color:#636e72;font-size:13px;padding:20px;text-align:center">
+            <div style="font-size:32px;margin-bottom:8px">📋</div>
+            <div>暂无复习总结</div>
+            <div style="font-size:11px;margin-top:4px">完成对话学习后自动生成结构化复习总结</div>
+        </div>`;
     }
 }
 
@@ -2433,7 +2463,12 @@ async function loadLearningHistory() {
         const defenseRecords = data.defense_records || [];
 
         if (history.length === 0 && defenseRecords.length === 0) {
-            container.innerHTML = '<div style="color:#636e72;font-size:13px;padding:20px;text-align:center">暂无学习记录，完成一次对话后自动生成</div>';
+            container.innerHTML = `<div style="color:#636e72;font-size:13px;padding:40px 20px;text-align:center">
+                <div style="font-size:48px;margin-bottom:12px">📚</div>
+                <div style="font-size:14px;font-weight:500;margin-bottom:8px">暂无学习记录</div>
+                <div style="font-size:12px;line-height:1.6">开始对话学习后，这里会展示你的学习历程：<br/>
+                对话次数、学习时长、掌握进度一目了然</div>
+            </div>`;
             return;
         }
 
@@ -3237,6 +3272,29 @@ async function refreshSyllabusData() {
     if (!AppState.currentCourseId) return;
     const btn = document.getElementById('syllabus-refresh-btn');
     if (!btn) return;
+    
+    // 先检查课程是否有章节
+    let courseData;
+    try {
+        courseData = await API.get(`/api/courses/${AppState.currentCourseId}`);
+    } catch (e) {
+        console.error('获取课程信息失败', e);
+        showToast('获取课程信息失败', 'error');
+        return;
+    }
+    
+    const chapters = courseData.chapters || [];
+    if (chapters.length === 0) {
+        showToast('请先生成分章，再刷新知识点', 'warning');
+        return;
+    }
+    
+    const loadedChapters = chapters.filter(ch => ch.is_loaded);
+    if (loadedChapters.length === 0) {
+        showToast('请先加载章节内容，再刷新知识点', 'warning');
+        return;
+    }
+    
     btn.disabled = true;
     btn.textContent = '⏳ 生成中...';
     try {

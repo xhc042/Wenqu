@@ -837,6 +837,12 @@ NON_CORE_TITLE_PATTERNS = [
     _re.compile(r'^(附录|附录[一二三四五六七八九十]|附\s*[一二三四五六七八九十])'),
     _re.compile(r'^(参考文献|参考资料|推荐阅读|延伸阅读|书目|索引)'),
     _re.compile(r'^(序)$|^(序[一二三四五六七八九十])$'),
+    # 版权相关（P3-③：导入时跳过版权页）
+    _re.compile(r'^(版权声明|版权信息|版权页|声明|著作权)'),
+    _re.compile(r'^(出版许可证|版号)'),
+    # 数据引用/参考资料类（P3-③补充：结语、数据引用说明等辅助性章节）
+    _re.compile(r'^(数据引用说明|资料来源说明|引用说明|数据来源|参考文献列表|参考文献目录)'),
+    _re.compile(r'^(勘误表|修订说明|修订版说明|再版说明|增订说明|增补说明)'),
 ]
 
 # P3-①: 关键词白名单（标题包含这些词也算元数据章节）
@@ -845,6 +851,11 @@ NON_CORE_TITLE_KEYWORDS = {
     "序", "跋", "后记", "致谢", "鸣谢", "简介", "提要", "凡例",
     "出版说明", "写在前面", "编者按", "声明", "告白", "代序",
     "引子", "楔子", "前言", "序言", "自序", "卷首语",
+    # P3-③：版权相关（仅"著作权"用关键词匹配，"版权"相关仅通过前缀模式跳过）
+    "著作权",
+    # P3-③补充：数据引用/参考资料类关键词
+    # 仅加足够专精的词，避免误判正文章节"第一章 数据引用方法"等
+    "勘误表", "修订说明", "再版说明", "增订说明",
 }
 
 
@@ -890,7 +901,8 @@ async def extract_chapter_snapshot(text: str, title: str) -> dict:
 
     if is_meta:
         # 元数据章节：用更短的 prompt 并强制 importance 较低
-        prompt = f"""你是读书导师。这是书的元数据章节（序言/前言/自序/推荐序/附录等），它的作用是介绍背景。
+        # P3-③：版权/声明类章节也属于元数据，不作为核心知识
+        prompt = f"""你是读书导师。这是书的元数据章节（序言/前言/自序/推荐序/版权声明/附录等），它的作用是介绍背景而非传递核心知识。
 
 章节：{title}
 内容：{text[:1000]}
@@ -1115,28 +1127,36 @@ async def generate_global_highlights(course_id: str, snapshots: list, chapter_ti
         meta_warning = ""
 
     # v1.3 P0-②: prompt 强化"本书独有"原则,避免生成放之四海皆准的泛化模板
-    prompt = f"""基于以下全书章节快照，请完成5个任务：
+    # 注意：如果快照为空或太少，简化 prompt 要求
+    if len(snapshots) < 3:
+        # 快照太少时，使用简化版 prompt
+        prompt = f"""基于以下全书章节快照，请完成5个任务：
 
 {snapshot_text}
 {meta_warning}
-任务1：提炼5-10个最重要的核心知识点（v1.3 强化版：必须锚定本书独有内容）
+任务1：提炼3-8个最重要的核心知识点（用"能+具体动作"描述，每个不超过25字）
+任务2：推荐优先学习的章节顺序（**只能推荐正文章节**）
+任务3：标注章节间的关键依赖关系
+任务4：识别全书最核心的3-5个正文章节
+任务5：用50字以内描述全书的核心逻辑关系
 
-要求：每条 key_point 必须满足"本书独有"原则——
-1. 必须引用快照中的具体关键词、具体观点、具体方法
-2. 必须让读者能区分"这本书"与"其他讲类似主题的书"
-3. 离开这本书的具体内容，这条知识就不成立
-4. 格式：[具体知识/方法/观点] + 为什么本书这样主张（即哪个章节/哪个快照支撑）
+返回严格JSON（不要任何其他文字）：
+{{
+  "key_points": ["知识点1", "知识点2", ...],
+  "chapter_priorities": ["第5章", "第8章", ...],
+  "chapter_dependencies": {{"第8章": "第5章"}},
+  "core_chapter_indices": ["第5章", "第8章", "第11章"],
+  "relationships": "全书核心逻辑关系描述"
+}}"""
+    else:
+        prompt = f"""基于以下全书章节快照，请完成5个任务：
 
-✅ 好例子（锚定本书具体内容）：
-- "浮存金策略的复利效应：通过 GEICO 保险的浮存金，巴菲特构建了低成本资金池的复利模型（第8章支撑）"
-- "能力圈的'内部记分卡'：用自己定义的衡量标准对抗市场先生的情绪波动（第11章支撑）"
-
-❌ 坏例子（泛化、放哪本书都能用，禁止）：
-- "能理解价值投资核心理念"
-- "能掌握长期投资策略"
-- "能区分投资与投机的差异"
-- "本章讲解XXX"
-
+{snapshot_text}
+{meta_warning}
+任务1：提炼5-10个最重要的核心知识点（**用"能+具体动作"描述，每个不超过25字，要具体有参考价值**）
+   - ✅ 好例子："能列出ETF的5种投资策略"、"能解释ETF运作机制"、"能区分主动型与被动型ETF"
+   - ❌ 坏例子："能理解ETF"、"能掌握ETF知识"、"能了解XXX"、"本章讲解XXX"
+   - 核心知识点应该告诉读者学完后具体能做什么，而不是泛泛而谈
 任务2：推荐优先学习的章节顺序（**只能推荐正文章节，不能是序言/前言/自序/附录**）
 任务3：标注章节间的关键依赖关系（哪些正文章节必须先学）
 任务4：识别全书最核心的4-6个正文章节（占全书价值80%），**绝对不能包含序言/前言/自序/附录等元数据章节**
@@ -1144,7 +1164,7 @@ async def generate_global_highlights(course_id: str, snapshots: list, chapter_ti
 
 返回严格JSON（不要任何其他文字）：
 {{
-  "key_points": ["锚定本书的具体知识1", "锚定本书的具体知识2", ...],
+  "key_points": ["能+具体动作", "能+具体动作", ...],
   "chapter_priorities": ["第5章", "第8章", ...],
   "chapter_dependencies": {{"第8章": "第5章"}},
   "core_chapter_indices": ["第5章", "第8章", "第11章", "第14章"],
@@ -1218,11 +1238,26 @@ async def generate_global_highlights(course_id: str, snapshots: list, chapter_ti
                 and 0 <= _parse_chapter_num(s) < len(chapter_titles)
             ]
 
-            # 验证：至少有内容
-            if key_points or chapter_priorities:
+            # 验证：只要有任意有效数据就算成功（更宽容的验证）
+            # 允许 key_points 和 chapter_priorities 其中之一为空
+            has_valid_data = (
+                (key_points and isinstance(key_points, list) and len(key_points) > 0) or
+                (chapter_priorities and isinstance(chapter_priorities, list) and len(chapter_priorities) > 0) or
+                (core_chapter_indices and isinstance(core_chapter_indices, list) and len(core_chapter_indices) > 0)
+            )
+            
+            if has_valid_data:
                 # 兜底：如果 LLM 没返回核心章节，基于重要性计算
-                if not core_chapter_indices:
+                if not core_chapter_indices or len(core_chapter_indices) == 0:
                     core_chapter_indices = _infer_core_chapters(snapshots, chapter_titles)
+                
+                # 兜底：如果 LLM 没返回知识点，用关键词生成
+                if not key_points or len(key_points) == 0:
+                    key_points = _generate_fallback_key_points(snapshots, chapter_titles)
+                
+                # 兜底：如果 LLM 没返回章节优先级，生成默认顺序
+                if not chapter_priorities or len(chapter_priorities) == 0:
+                    chapter_priorities = [f"第{i+1}章" for i in range(min(10, len(chapter_titles)))]
 
                 return {
                     "key_points": key_points if isinstance(key_points, list) else [],
@@ -1232,7 +1267,7 @@ async def generate_global_highlights(course_id: str, snapshots: list, chapter_ti
                     "relationships": relationships[:200],
                 }
             else:
-                last_error = "LLM返回空数据"
+                last_error = f"LLM返回空数据（key_points={len(key_points)}, chapter_priorities={len(chapter_priorities)}, core_chapters={len(core_chapter_indices)}）"
         except Exception as e:
             last_error = f"LLM调用失败: {e}"
             import logging
@@ -1242,6 +1277,54 @@ async def generate_global_highlights(course_id: str, snapshots: list, chapter_ti
     import logging
     logging.error(f"全局精华生成最终失败: {last_error}")
     return _build_highlights_fallback(snapshots, chapter_titles)
+
+
+def _generate_fallback_key_points(snapshots: list, chapter_titles: list, max_points: int = 10) -> list:
+    """
+    当 LLM 未返回知识点时，基于快照关键词生成兜底知识点
+    """
+    key_points = []
+    seen_keywords = set()
+    
+    # 按重要性排序快照
+    sorted_snapshots = sorted(
+        enumerate(snapshots),
+        key=lambda x: x[1].get("importance", 3),
+        reverse=True
+    )
+    
+    for idx, snapshot in sorted_snapshots:
+        if len(key_points) >= max_points:
+            break
+        
+        title = chapter_titles[idx] if idx < len(chapter_titles) else f"第{idx+1}章"
+        if is_non_core_chapter(title):
+            continue
+            
+        keywords = snapshot.get("keywords", [])
+        viewpoint = snapshot.get("core_viewpoint", "")
+        
+        # 从关键词生成知识点
+        for kw in keywords[:2]:
+            if kw and kw not in seen_keywords:
+                point = f"能描述{kw}的核心要点和应用场景"
+                if point not in key_points:
+                    key_points.append(point)
+                    seen_keywords.add(kw)
+                    if len(key_points) >= max_points:
+                        break
+        
+        # 如果有好的观点，也加入
+        if viewpoint and len(viewpoint) > 10 and not viewpoint.startswith("本章讲解") and not viewpoint.startswith("了解"):
+            point = f"能理解{viewpoint[:30]}"
+            if point not in key_points:
+                key_points.append(point)
+    
+    # 如果还是没有知识点，给一个通用的
+    if not key_points:
+        key_points = ["能掌握本书核心概念并应用到实际场景中"]
+    
+    return key_points[:max_points]
 
 
 def _infer_core_chapters(snapshots: list, chapter_titles: list = None, top_n: int = 5) -> list:

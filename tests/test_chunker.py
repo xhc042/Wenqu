@@ -46,6 +46,45 @@ class TestIsNonCoreChapter:
         assert is_non_core_chapter("跋") is True
         assert is_non_core_chapter("致谢") is True
 
+    def test_detect_copyright(self):
+        """P3-③: 检测版权/声明类章节（导入时跳过）
+
+        注意："版权"不加入关键词列表（避免误判"第三章 版权保护"等正文章节），
+        仅通过前缀模式匹配"版权声明/版权信息/版权页"等专属版权页标题。
+        """
+        # 通过前缀模式匹配
+        assert is_non_core_chapter("版权声明") is True
+        assert is_non_core_chapter("版权信息") is True
+        assert is_non_core_chapter("版权页") is True
+        assert is_non_core_chapter("声明") is True
+        assert is_non_core_chapter("著作权") is True
+        # 通过关键词匹配（"著作权"是关键词）
+        assert is_non_core_chapter("著作权声明") is True
+        # 普通正文章节不应误判
+        assert is_non_core_chapter("第三章 版权保护") is False
+        assert is_non_core_chapter("第一章 ETF版权之争") is False
+
+    def test_detect_reference_chapters(self):
+        """P3-③补充: 检测数据引用/参考资料类辅助章节
+
+        注意：关键词只加"勘误表/修订说明/再版说明/增订说明"等专精词，
+        不加"数据引用/资料来源"（会误判正文章节"第一章 数据引用方法"）。
+        """
+        # 前缀模式匹配
+        assert is_non_core_chapter("数据引用说明") is True
+        assert is_non_core_chapter("资料来源说明") is True
+        assert is_non_core_chapter("引用说明") is True
+        assert is_non_core_chapter("数据来源") is True
+        assert is_non_core_chapter("勘误表") is True
+        assert is_non_core_chapter("修订说明") is True
+        assert is_non_core_chapter("再版说明") is True
+        assert is_non_core_chapter("增订说明") is True
+        # 关键词匹配（专精词）
+        assert is_non_core_chapter("勘误表更新记录") is True
+        # 普通正文章节不应误判
+        assert is_non_core_chapter("第一章 数据引用方法") is False
+        assert is_non_core_chapter("第三章 修订方案") is False
+
     def test_core_chapter_not_detected(self):
         """正文章节不应被识别为元数据"""
         assert is_non_core_chapter("第一章 引言") is False
