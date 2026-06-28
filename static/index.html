@@ -282,6 +282,7 @@
                 <button class="option-btn duration-btn" data-duration="15" onclick="selectDuration(15)">⏱ 15分钟</button>
                 <button class="option-btn duration-btn selected" data-duration="30" onclick="selectDuration(30)">⏱ 30分钟</button>
                 <button class="option-btn duration-btn" data-duration="60" onclick="selectDuration(60)">⏱ 60分钟</button>
+                <button class="option-btn duration-btn" data-duration="120" onclick="selectDuration(120)">⏱ 120分钟</button>
             </div>
         </div>
         <div style="display:flex;gap:8px;justify-content:flex-end">
@@ -427,6 +428,18 @@
         </div>
     </div>
 </div>
+
+<!-- ==================== 知识快照容器 ==================== -->
+<div id="snapshot-container" class="snapshot-container"></div>
+
+<!-- ==================== 思辨笔记容器 ==================== -->
+<div id="spiritual-notes-container" class="spiritual-notes-container"></div>
+
+<!-- ==================== 掌握度仪表盘 ==================== -->
+<div id="mastery-dashboard" class="mastery-dashboard" style="display:none"></div>
+
+<!-- ==================== 全书总览视图 ==================== -->
+<div id="course-overview" class="course-overview" style="display:none"></div>
 
 <script src="/static/js/app.js?v={{VERSION}}"></script>
 </body>

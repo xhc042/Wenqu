@@ -274,6 +274,23 @@ def build_system_prompt(role_id: str, depth: str, sliders: dict, course_title: s
     if previous_summaries:
         prev_summary_text = "\n前序章节要点：\n" + "\n".join(previous_summaries[:3])
 
+    # 研读模式：添加辩证分析指令
+    dialectical_instruction = ""
+    if depth == "deep":
+        dialectical_instruction = f"""
+## 辩证分析指令（研读模式专用）
+
+作为{role_id}老师，你在教学中必须做到：
+
+1. **跨章对比**：每次提问时，至少引用一个前序章节的观点进行对比
+2. **隐含前提揭示**：指出作者未明确说明的假设，并质疑其合理性
+3. **应用场景检验**：引导学生思考"这个理论在什么情况下会失效"
+4. **反向思考**：定期要求学生从对立角度分析同一问题
+
+前序章节摘要（供对比使用）：
+{chr(10).join(f"- {s['title']}: {s['summary']}" for s in previous_summaries[:5]) if previous_summaries else "(暂无前序章节)"}
+"""
+
     system_text = f"""{role_prompt}
 
 ## 当前课程信息
@@ -285,6 +302,7 @@ def build_system_prompt(role_id: str, depth: str, sliders: dict, course_title: s
 - SHARE复述长度限制：{"不限" if depth_cfg["share_max_length"] == 0 else f"不超过{depth_cfg['share_max_length']}字"}
 - PROBE复杂度：{depth_cfg['probe_complexity']}
 - EXPLAIN详细度：{depth_cfg['explain_detail']}
+{dialectical_instruction}
 
 ## 风格调节参数
 {"；".join(slider_notes) if slider_notes else "按默认风格"}
@@ -308,3 +326,29 @@ def build_system_prompt(role_id: str, depth: str, sliders: dict, course_title: s
 <!-- 系统提示词 - 问渠 v1.1 -->
 """
     return system_text
+
+
+def build_deep_dialectical_prompt(role_id: str, course_title: str, chapter_title: str, previous_summaries: list) -> str:
+    """
+    为研读模式构建专门的辩证分析提示词（用于扩展LLM的系统指令）
+    """
+    dialectical_instruction = f"""
+## 辩证分析指令（研读模式专用）
+
+作为{role_id}老师，你在教学中必须做到：
+
+1. **跨章对比**：每次提问时，至少引用一个前序章节的观点进行对比
+2. **隐含前提揭示**：指出作者未明确说明的假设，并质疑其合理性
+3. **应用场景检验**：引导学生思考"这个理论在什么情况下会失效"
+4. **反向思考**：定期要求学生从对立角度分析同一问题
+
+前序章节摘要（供对比使用）：
+{chr(10).join(f"- {s['title']}: {s['summary']}" for s in previous_summaries[:5]) if previous_summaries else "(暂无前序章节)"}
+
+批判性思维角度：
+- 作者假设是否合理？
+- 不同章节之间是否存在矛盾？
+- 这个理论的反面观点是什么？
+- 在实际应用中可能遇到什么局限？
+"""
+    return dialectical_instruction

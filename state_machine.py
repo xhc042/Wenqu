@@ -35,6 +35,11 @@ def strip_thinking_tags(content: str) -> str:
     return content.strip()
 
 
+async def noop():
+    """空操作占位函数（用于 asyncio.gather 条件分支）"""
+    return None
+
+
 class DialogueStateMachine:
     """
     苏格拉底式对话状态机
@@ -50,6 +55,7 @@ class DialogueStateMachine:
     EXPLAIN = "EXPLAIN"
     GUIDE = "GUIDE"
     ACTION = "ACTION"
+    DEBATE = "DEBATE"
     END = "END"
 
     def __init__(
@@ -161,9 +167,16 @@ class DialogueStateMachine:
     async def _share(self) -> AsyncGenerator[str, None]:
         """SHARE状态：AI分享教材片段"""
         self.state = self.SHARE
+
+        # 获取本章未掌握的项，用于注入提示
+        mastery_hint = self._get_mastery_hint()
+        share_prompt = f"""请用自己的话复述这段教材的核心观点。
+{mastery_hint}
+以'书上有个很有趣的观点...'或'这段让我联想到...'开头。"""
+
         self.messages.append({
             "role": "user",
-            "content": "请用自己的话复述这段教材的核心观点，以'书上有个很有趣的观点...'或'这段让我联想到...'开头。",
+            "content": share_prompt,
         })
 
         content_parts = []
@@ -190,9 +203,12 @@ class DialogueStateMachine:
         if weaknesses:
             weak_prompt = f"用户当前的薄弱点包括：{'、'.join(weaknesses[:3])}。请针对薄弱点提问。"
 
+        # 获取掌握项检查清单
+        mastery_check = self._get_mastery_check()
+
         self.messages.append({
             "role": "user",
-            "content": f"请针对这段教材内容提出1个开放性问题，帮助用户深入思考。{weak_prompt}只能提1个问题，不要多问。",
+            "content": f"请针对这段教材内容提出1个开放性问题，帮助用户深入思考。{weak_prompt}\n{mastery_check}\n只能提1个问题，不要多问。",
         })
 
         content_parts = []
@@ -206,6 +222,48 @@ class DialogueStateMachine:
 
         # 进入WAIT_USER
         self.state = self.WAIT_USER
+
+    def _get_mastery_hint(self) -> str:
+        """获取掌握项提示（用于SHARE阶段）"""
+        chapter_pending = [s for s in self.syllabus_items
+                          if s["chapter_index"] == self.chapter_index
+                          and s["status"] == "pending"]
+        if chapter_pending:
+            hint_items = [f"- {item['description']}" for item in chapter_pending[:3]]
+            return f"特别注意以下需要掌握的能力点：\n{chr(10).join(hint_items)}\n"
+        return ""
+
+    def _get_mastery_check(self) -> str:
+        """获取掌握项检查清单（用于PROBE阶段）"""
+        chapter_items = [s for s in self.syllabus_items
+                        if s["chapter_index"] == self.chapter_index]
+        if chapter_items:
+            pending_items = [f"- {s['description']}" for s in chapter_items if s["status"] == "pending"]
+            if pending_items:
+                return f"请优先围绕以下知识点提问：\n{chr(10).join(pending_items[:3])}"
+        return ""
+
+    def _check_knowledge_coverage(self) -> dict:
+        """
+        检查当前章节的知识点覆盖情况
+        返回：哪些知识点已掌握、哪些还需要强化
+        """
+        chapter_items = [s for s in self.syllabus_items
+                        if s["chapter_index"] == self.chapter_index]
+
+        coverage = {
+            "total": len(chapter_items),
+            "mastered": sum(1 for s in chapter_items if s["status"] == "mastered"),
+            "in_progress": sum(1 for s in chapter_items if s["status"] == "in_progress"),
+            "pending": sum(1 for s in chapter_items if s["status"] == "pending"),
+        }
+
+        # 如果本章还有pending项，提示用户继续学习
+        if coverage["pending"] > 0 and coverage["mastered"] > 0:
+            coverage["partial"] = True
+            coverage["suggestion"] = f"本章还有{coverage['pending']}个知识点未掌握"
+
+        return coverage
 
     def _auto_mark_syllabus(self):
         """自动标记掌握项（SY-03规则 + 兜底）"""
@@ -309,8 +367,13 @@ class DialogueStateMachine:
         # ACTION：根据评估结果分支
         if status == "thinking":
             self.consecutive_stuck = 0
-            async for chunk in self._probe():
-                yield chunk
+            # 研读模式：检测是否触发辩论
+            if self.depth == "deep" and await self._check_debate_trigger(user_text):
+                async for chunk in self._start_debate():
+                    yield chunk
+            else:
+                async for chunk in self._probe():
+                    yield chunk
         elif status == "stuck":
             self.consecutive_stuck += 1
             if self.consecutive_stuck >= 3:
@@ -432,10 +495,144 @@ class DialogueStateMachine:
         self.state = self.END
         db.end_session(self.session_id, self.total_rounds)
 
+        # 更新掌握进度
+        self._update_mastery_progress()
+
         yield f"\n\n---\n\n📚 **本节课学习结束**（{reason}）\n\n"
 
         # 异步触发课后闭环
         await self._after_class_routines()
+
+    def _update_mastery_progress(self):
+        """更新课程的掌握进度"""
+        syllabus = db.get_syllabus_items(self.course_id)
+        by_chapter = {}
+        for s in syllabus:
+            ch_idx = s["chapter_index"]
+            if ch_idx not in by_chapter:
+                by_chapter[ch_idx] = {"total": 0, "mastered": 0}
+            by_chapter[ch_idx]["total"] += 1
+            if s["status"] == "mastered":
+                by_chapter[ch_idx]["mastered"] += 1
+
+        progress_data = {
+            "total": len(syllabus),
+            "mastered": [s["id"] for s in syllabus if s["status"] == "mastered"],
+            "in_progress": [s["id"] for s in syllabus if s["status"] == "in_progress"],
+            "pending": [s["id"] for s in syllabus if s["status"] == "pending"],
+            "by_chapter": by_chapter,
+        }
+        db.update_mastery_progress(self.course_id, progress_data)
+
+    async def _check_debate_trigger(self, user_text: str) -> bool:
+        """
+        检测是否触发反方辩论
+        条件：学生连续两次完全认同教师观点
+        """
+        agreement_keywords = ["是的", "对", "有道理", "没错", "你说得对", "确实", "同意", "明白了"]
+        agreement_count = sum(1 for kw in agreement_keywords if kw in user_text)
+
+        # 如果认同词汇超过2个，且当前轮次>2，触发辩论
+        return agreement_count >= 2 and self.current_round > 2
+
+    async def _start_debate(self) -> AsyncGenerator[str, None]:
+        """切换到反方角色，提出对立观点"""
+        self.state = self.DEBATE
+
+        debate_prompt = f"""现在请你扮演与本章节观点对立的学者。
+针对刚才讨论的内容，提出一个有力的反对观点。
+
+要求：
+- 必须基于教材内容，不能凭空捏造
+- 观点要有学术依据，不能是情绪化反驳
+- 最后要求学生思考：哪种观点更有说服力？为什么？"""
+
+        self.messages.append({"role": "user", "content": debate_prompt})
+
+        content_parts = []
+        async for chunk in llm.chat_stream(self.messages, temperature=0.9):
+            content_parts.append(chunk)
+            yield chunk
+
+        full_content = "".join(content_parts)
+        self.messages.append({"role": "assistant", "content": full_content})
+        db.add_message(self.session_id, "assistant", full_content, self.DEBATE)
+
+    async def _generate_spiritual_notes(self) -> str:
+        """
+        学习结束后生成思辨笔记
+        包含矛盾点列表、未解问题、延伸思考方向
+        """
+        messages = db.get_messages(self.session_id)
+        user_msgs = [m for m in messages if m["role"] == "user"]
+        assistant_msgs = [m for m in messages if m["role"] == "assistant"]
+
+        chapter_title = self.chapter_info.get("title", f"第{self.chapter_index + 1}章")
+
+        prompt = f"""根据以下课堂对话，生成一份"思辨笔记"。
+
+章节：{chapter_title}
+
+学生回答：
+{chr(10).join(f"- {m['content'][:200]}" for m in user_msgs[-10:])}
+
+教师引导：
+{chr(10).join(f"- {m['content'][:200]}" for m in assistant_msgs[-10:])}
+
+笔记格式（只输出JSON）：
+{{"core_contradictions": ["...", "..."], "unresolved_questions": ["...", "..."], "extension_directions": ["...", "..."], "personal_reflection": "..."}}"""
+
+        try:
+            result = await llm.chat_json([
+                {"role": "system", "content": "你是思辨笔记生成助手。只返回JSON。"},
+                {"role": "user", "content": prompt},
+            ], temperature=0.3)
+
+            # 保存到数据库
+            db.add_spiritual_note(
+                course_id=self.course_id,
+                session_id=self.session_id,
+                chapter_index=self.chapter_index,
+                core_contradictions=json.dumps(result.get("core_contradictions", []), ensure_ascii=False),
+                unresolved_questions=json.dumps(result.get("unresolved_questions", []), ensure_ascii=False),
+                extension_directions=json.dumps(result.get("extension_directions", []), ensure_ascii=False),
+                personal_reflection=result.get("personal_reflection", ""),
+                raw_content=json.dumps(result, ensure_ascii=False),
+            )
+
+            return result.get("personal_reflection", "")
+        except Exception:
+            return ""
+
+    def _set_learning_target(self) -> dict:
+        """
+        根据模式和时长，动态设定学习目标
+        """
+        from config import MODE_CONTRACT_DEFAULTS
+
+        reading_mode = self.course_info.get("reading_mode", "standard")
+        mode_defaults = MODE_CONTRACT_DEFAULTS.get(reading_mode, MODE_CONTRACT_DEFAULTS["standard"])
+
+        if reading_mode == "speed":
+            # 速读：目标是掌握最重要的N个知识点
+            remaining_items = [s for s in self.syllabus_items
+                             if s["status"] != "mastered"]
+            target_count = min(5, len(remaining_items))
+        elif reading_mode == "standard":
+            # 细读：目标是完成当前章节的所有掌握项
+            remaining_items = [s for s in self.syllabus_items
+                             if s["chapter_index"] == self.chapter_index
+                             and s["status"] != "mastered"]
+            target_count = len(remaining_items)
+        else:
+            # 研读：目标是深度理解+辩证分析
+            target_count = "unlimited"
+
+        return {
+            "target_count": target_count,
+            "goal": mode_defaults["goal"],
+            "expected_output": mode_defaults["expected_output"],
+        }
 
     async def _after_class_routines(self):
         """课后闭环：自动触发各项产出物（并行执行，缩短等待时间）"""
@@ -464,11 +661,13 @@ class DialogueStateMachine:
             self._generate_group_chat(),
             self._generate_diary(),
             self._generate_summary(),
+            # 研读模式：额外生成思辨笔记
+            self._generate_spiritual_notes() if self.depth == "deep" else noop(),
             return_exceptions=True,
         )
 
         # 记录错误
-        task_names = ["画像更新", "情感分更新", "群聊生成", "日记生成", "总结生成"]
+        task_names = ["画像更新", "情感分更新", "群聊生成", "日记生成", "总结生成", "思辨笔记"]
         for i, r in enumerate(results):
             if isinstance(r, Exception):
                 errors.append(f"{task_names[i]}失败: {r}")

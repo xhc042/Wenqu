@@ -28,7 +28,7 @@ from config import (
 )
 from database import init_db
 import database as db
-from chunker import extract_text, smart_chunk, generate_syllabus_items, generate_course_summary
+from chunker import extract_text, smart_chunk, generate_syllabus_items, generate_course_summary, extract_chapter_snapshot, generate_global_highlights, generate_speed_read_syllabus
 from state_machine import DialogueStateMachine
 from llm_client import llm
 
@@ -314,6 +314,7 @@ async def generate_chapters(course_id: str):
     max_loaded = 3 if reading_mode == "deep" else 99  # 研读只预加载前3章
 
     # 保存章节到数据库
+    chapter_titles = []
     for idx, chapter_item in enumerate(chapters):
         if isinstance(chapter_item, tuple) and len(chapter_item) >= 3:
             title, content = chapter_item[0], chapter_item[1]
@@ -324,6 +325,8 @@ async def generate_chapters(course_id: str):
         else:
             title, content = str(chapter_item), ""
             meta = {}
+
+        chapter_titles.append(title)
 
         # 决定是否已加载
         if is_speed:
@@ -348,9 +351,122 @@ async def generate_chapters(course_id: str):
 
     db.add_learning_event(course_id, "lesson_end", {"action": "chapters_generated", "count": len(chapters)})
 
+    # 速读模式：额外生成知识快照和全局精华
+    if is_speed:
+        import logging
+        logging.info(f"[速读模式] 开始生成知识快照，共 {len(chapters)} 章")
+        try:
+            # 为每章生成知识快照
+            snapshots = []
+            for chapter_item in chapters:
+                # 从 meta 中获取实际的 chapter_index（与 chapters 表一致）
+                if isinstance(chapter_item, tuple) and len(chapter_item) >= 3:
+                    title, content, meta = chapter_item[0], chapter_item[1], chapter_item[2]
+                    chapter_idx = meta.get("idx", 0)
+                elif isinstance(chapter_item, tuple) and len(chapter_item) >= 2:
+                    title, content = chapter_item[0], chapter_item[1]
+                    chapter_idx = 0
+                else:
+                    continue
+
+                logging.info(f"[速读模式] 处理第 {chapter_idx} 章: {title[:30]}")
+
+                # 速读模式：从 EPUB 提取更多内容用于快照（不限于首尾段）
+                snapshot_content = ""
+                if source_type == "epub" and source_path:
+                    from chunker import extract_toc_from_epub, extract_chapter_content_by_href
+                    toc_items, _ = await extract_toc_from_epub(source_path)
+                    for toc_item in toc_items:
+                        if toc_item.get("idx") == chapter_idx:
+                            href = toc_item.get("href", "")
+                            if href:
+                                snapshot_content = await extract_chapter_content_by_href(source_path, href)
+                            break
+
+                # 如果没有从 EPUB 提取到内容，使用 chapters 中已有内容
+                if not snapshot_content:
+                    snapshot_content = content
+
+                if not snapshot_content:
+                    logging.warning(f"[速读模式] 第 {chapter_idx} 章无内容")
+                    continue
+
+                snapshot = await extract_chapter_snapshot(snapshot_content, title)
+                logging.info(f"[速读模式] 快照结果: keywords={len(snapshot.get('keywords', []))}, viewpoint={snapshot.get('core_viewpoint', '')[:30]}, importance={snapshot.get('importance', 0)}, fallback={snapshot.get('_fallback', False)}")
+                snapshots.append(snapshot)
+                db.add_chapter_snapshot(
+                    course_id, chapter_idx,
+                    json.dumps(snapshot.get("keywords", []), ensure_ascii=False),
+                    snapshot.get("core_viewpoint", ""),
+                    global_priority=snapshot.get("importance", 0),  # 用重要性作为优先级
+                    learning_goal=snapshot.get("learning_goal", ""),
+                    importance=snapshot.get("importance", 0),
+                    difficulty=snapshot.get("difficulty", ""),
+                )
+
+            # 全局精华提炼（只做一次）
+            if snapshots:
+                logging.info(f"[速读模式] 生成全局精华，共 {len(snapshots)} 个快照")
+                highlights = await generate_global_highlights(course_id, snapshots, chapter_titles)
+                db.add_global_highlights(
+                    course_id,
+                    json.dumps(highlights.get("key_points", []), ensure_ascii=False),
+                    json.dumps(highlights.get("chapter_priorities", []), ensure_ascii=False),
+                    highlights.get("relationships", ""),
+                    json.dumps(highlights.get("core_chapter_indices", []), ensure_ascii=False),
+                    json.dumps(highlights.get("chapter_dependencies", {}), ensure_ascii=False),
+                )
+
+                # 速读模式：生成精简掌握项（只提取最重要的20%知识点）
+                logging.info(f"[速读模式] 开始生成精华掌握项")
+                try:
+                    syllabus_items = await generate_speed_read_syllabus(course_id, chapters, snapshots)
+                    for ch_idx, desc in syllabus_items:
+                        db.add_syllabus_item(course_id, ch_idx, desc)
+                    logging.info(f"[速读模式] 完成，生成了 {len(syllabus_items)} 条精华掌握项")
+                except Exception as syllabus_err:
+                    logging.warning(f"[速读模式] 精华掌握项生成失败: {syllabus_err}")
+
+            logging.info(f"[速读模式] 完成，生成了 {len(snapshots)} 个快照")
+            return {
+                "total_chapters": len(chapters),
+                "snapshots_generated": len(snapshots),
+                "highlights_generated": bool(snapshots),
+                "reading_mode": "speed",
+                "chapters": [
+                    {"idx": c[2].get("idx", i), "title": c[0], "is_loaded": False}
+                    if isinstance(c, tuple) and len(c) >= 3 else
+                    {"idx": i, "title": c[0] if isinstance(c, tuple) else str(c), "is_loaded": False}
+                    for i, c in enumerate(chapters)
+                ],
+            }
+        except Exception as e:
+            # 快照生成失败不影响主流程
+            logging.warning(f"速读模式快照生成失败: {e}")
+            import traceback
+            logging.warning(traceback.format_exc())
+            return {
+                "total_chapters": len(chapters),
+                "snapshots_generated": 0,
+                "highlights_generated": False,
+                "reading_mode": "speed",
+                "chapters": [
+                    {"idx": c[2].get("idx", i), "title": c[0], "is_loaded": False}
+                    if isinstance(c, tuple) and len(c) >= 3 else
+                    {"idx": i, "title": c[0] if isinstance(c, tuple) else str(c), "is_loaded": False}
+                    for i, c in enumerate(chapters)
+                ],
+            }
+
     return {
         "total_chapters": len(chapters),
-        "chapters": [{"idx": i, "title": t[0], "is_loaded": is_speed or i < max_loaded} if isinstance(t, tuple) else {"idx": i, "title": str(t), "is_loaded": True} for i, t in enumerate(chapters)],
+        "reading_mode": course.get("reading_mode", "standard"),
+        "chapters": [
+            {"idx": c[2].get("idx", i), "title": c[0], "is_loaded": is_speed or i < max_loaded}
+            if isinstance(c, tuple) and len(c) >= 3 else
+            {"idx": i, "title": c[0] if isinstance(c, tuple) else str(c), "is_loaded": True}
+            for i, c in enumerate(chapters)
+        ],
     }
 
 
@@ -1498,6 +1614,493 @@ def _sync_llm_from_db():
         llm.api_key = active["api_key"]
         llm.base_url = active["base_url"].rstrip("/")
         llm.model = active["model_name"]
+
+
+# ==================== 全局概览 API ====================
+@app.get("/api/courses/{course_id}/overview")
+async def get_course_overview(course_id: str):
+    """获取课程全局学习概览"""
+    course = db.get_course(course_id)
+    if not course:
+        raise HTTPException(404, "课程不存在")
+
+    syllabus = db.get_syllabus_items(course_id)
+    chapters = db.get_chapters(course_id)
+    reading_mode = course.get("reading_mode", "standard")
+
+    # 速读模式：使用章节快照数量作为统计
+    if reading_mode == "speed":
+        snapshots = db.get_chapter_snapshots(course_id)
+        highlights = db.get_global_highlights(course_id)
+
+        # 章节维度统计（基于快照）
+        chapter_stats = []
+        for ch in chapters:
+            snapshot = next((s for s in snapshots if s["chapter_index"] == ch["idx"]), None)
+            sessions = db.get_sessions(course_id)
+            ch_sessions = [s for s in sessions if s.get("chapter_index") == ch["idx"]]
+            chapter_stats.append({
+                "idx": ch["idx"],
+                "title": ch["title"],
+                "total": 1 if snapshot else 0,
+                "mastered": len(ch_sessions),
+                "is_loaded": ch.get("is_loaded", 0),
+                "importance": snapshot.get("importance", 0) if snapshot else 0,
+                "learning_goal": snapshot.get("learning_goal", "") if snapshot else "",
+            })
+
+        # === 智能三级推荐学习顺序 ===
+        import re
+
+        def parse_chapter_num(s: str) -> int:
+            """从'第N章'中提取数字"""
+            m = re.search(r'第(\d+)章', s)
+            return int(m.group(1)) - 1 if m else -1
+
+        # 解析核心章节和依赖关系
+        core_indices = set()
+        if highlights:
+            for s in highlights.get("core_chapter_indices", []):
+                idx = parse_chapter_num(s)
+                if idx >= 0:
+                    core_indices.add(idx)
+
+        chapter_dependencies = {}
+        if highlights:
+            for ch_key, deps in highlights.get("chapter_dependencies", {}).items():
+                ch_idx = parse_chapter_num(ch_key)
+                if ch_idx < 0:
+                    continue
+                if isinstance(deps, str):
+                    dep_idx = parse_chapter_num(deps)
+                    if dep_idx >= 0:
+                        chapter_dependencies[ch_idx] = [dep_idx]
+                elif isinstance(deps, list):
+                    dep_indices = []
+                    for d in deps:
+                        di = parse_chapter_num(d)
+                        if di >= 0:
+                            dep_indices.append(di)
+                    if dep_indices:
+                        chapter_dependencies[ch_idx] = dep_indices
+
+        # 已学习的章节
+        learned_indices = {s.get("chapter_index") for s in chapter_stats if s["mastered"] > 0}
+
+        # 1. 已学习章节：按学习顺序
+        learned_list = []
+        for ch in chapters:
+            if ch["idx"] in learned_indices:
+                snapshot = next((s for s in snapshots if s["chapter_index"] == ch["idx"]), None)
+                learned_list.append({
+                    "idx": ch["idx"],
+                    "title": ch["title"],
+                    "learning_goal": snapshot.get("learning_goal", "") if snapshot else "",
+                    "importance": snapshot.get("importance", 0) if snapshot else 0,
+                })
+
+        # 2. 核心未学章节：基于依赖关系+重要性排序
+        core_unlearned = []
+        for ch in chapters:
+            if ch["idx"] in learned_indices or ch["idx"] not in core_indices:
+                continue
+            snapshot = next((s for s in snapshots if s["chapter_index"] == ch["idx"]), None)
+            deps = chapter_dependencies.get(ch["idx"], [])
+            core_unlearned.append({
+                "idx": ch["idx"],
+                "title": ch["title"],
+                "learning_goal": snapshot.get("learning_goal", "") if snapshot else "",
+                "importance": snapshot.get("importance", 3) if snapshot else 3,
+                "dependencies": deps,
+                "deps_satisfied": all(d in learned_indices or d in core_indices for d in deps),
+            })
+
+        # 拓扑排序：优先推荐依赖已满足的章节
+        def sort_by_deps(items):
+            """按依赖关系排序：依赖已满足的排前面"""
+            return sorted(items, key=lambda x: (not x["deps_satisfied"], -x["importance"], x["idx"]))
+
+        core_unlearned = sort_by_deps(core_unlearned)
+
+        # 3. 可选章节：非核心章节
+        optional_list = []
+        for ch in chapters:
+            if ch["idx"] in learned_indices or ch["idx"] in core_indices:
+                continue
+            snapshot = next((s for s in snapshots if s["chapter_index"] == ch["idx"]), None)
+            optional_list.append({
+                "idx": ch["idx"],
+                "title": ch["title"],
+                "learning_goal": snapshot.get("learning_goal", "") if snapshot else "",
+                "importance": snapshot.get("importance", 0) if snapshot else 0,
+            })
+        optional_list.sort(key=lambda x: (-x["importance"], x["idx"]))
+
+        # 构建最终推荐数据结构
+        recommended_order = {
+            "core_count": len(core_indices),
+            "total_count": len(chapters),
+            "learned": learned_list,
+            "core_to_learn": core_unlearned,  # 核心待学
+            "optional": optional_list,  # 可选
+            "next_chapter": core_unlearned[0] if core_unlearned else (optional_list[0] if optional_list else None),
+        }
+
+        # 薄弱环节：未学习章节（简化展示）
+        weak_areas = [
+            {
+                "id": ch["idx"],
+                "description": f"第{ch['idx'] + 1}章「{ch['title']}」",
+                "chapter_index": ch["idx"],
+                "status": "未学习",
+                "is_core": ch["idx"] in core_indices
+            }
+            for ch in chapters if ch["idx"] not in learned_indices
+        ][:5]
+
+        # 知识覆盖率：核心章节的完成度
+        core_total = len(core_indices) if core_indices else len(chapters)
+        core_learned = sum(1 for ch in chapters if ch["idx"] in core_indices and ch["idx"] in learned_indices)
+        core_percent = round(core_learned / core_total * 100, 1) if core_total > 0 else 0
+
+        total_points = len(snapshots)
+        mastered_points = len(snapshots)
+        percent = 100.0 if total_points > 0 else 0.0
+
+        strategy = {
+            "speed": "精华提炼模式 — 聚焦最重要的20%知识点",
+            "standard": "系统学习模式 — 逐章覆盖全部知识点",
+            "deep": "辩证分析模式 — 深度理解+批判性思考",
+        }
+
+        # 智能建议
+        next_ch = recommended_order["next_chapter"]
+        if total_points == 0:
+            recommendation = "正在生成知识快照，请稍候..."
+        elif next_ch:
+            recommendation = f"建议先学核心章节，下一站：第{next_ch['idx']+1}章「{next_ch['title']}」"
+        else:
+            recommendation = f"🎉 核心章节已学完！共掌握{core_learned}/{core_total}个核心章节（{core_percent}%）"
+
+        return {
+            "reading_mode": reading_mode,
+            "strategy_description": strategy.get(reading_mode, strategy["standard"]),
+            "knowledge_coverage": {
+                "total_points": total_points,
+                "mastered_points": mastered_points,
+                "percent": percent,
+                "total_chapters": len(chapters),
+                "core_chapters": core_total,
+                "core_learned": core_learned,
+                "core_percent": core_percent,
+            },
+            "chapter_stats": chapter_stats,
+            "recommended_order": recommended_order,  # 新的三级结构
+            "weak_areas": weak_areas,
+            "recommendation": recommendation,
+            "highlights": highlights,
+        }
+
+    # 细读/研读模式：使用掌握项统计
+    total_points = len(syllabus)
+    mastered_points = sum(1 for s in syllabus if s["status"] == "mastered")
+
+    # 章节维度统计
+    chapter_stats = []
+    for ch in chapters:
+        ch_items = [s for s in syllabus if s["chapter_index"] == ch["idx"]]
+        chapter_stats.append({
+            "idx": ch["idx"],
+            "title": ch["title"],
+            "total": len(ch_items),
+            "mastered": sum(1 for s in ch_items if s["status"] == "mastered"),
+            "is_loaded": ch.get("is_loaded", 0),
+        })
+
+    strategy = {
+        "speed": "精华提炼模式 — 聚焦最重要的20%知识点",
+        "standard": "系统学习模式 — 逐章覆盖全部知识点",
+        "deep": "辩证分析模式 — 深度理解+批判性思考",
+    }
+
+    # 识别薄弱环节：未掌握的知识点
+    pending = [s for s in syllabus if s["status"] == "pending"]
+    weak_areas = [
+        {"id": s["id"], "description": s["description"], "chapter_index": s["chapter_index"], "status": "未掌握"}
+        for s in pending[:5]
+    ]
+
+    # 智能学习顺序推荐：按章节掌握度推荐
+    # 优先推荐：未开始的章节 > 进行中的章节 > 已掌握的章节
+    recommended_order = []
+    for ch in chapters:
+        ch_items = [s for s in syllabus if s["chapter_index"] == ch["idx"]]
+        mastered = sum(1 for s in ch_items if s["status"] == "mastered")
+        total = len(ch_items)
+        
+        if total == 0:
+            continue
+        
+        mastered_ratio = mastered / total if total > 0 else 0
+        if mastered_ratio == 0:
+            priority = "high"  # 未开始
+        elif mastered_ratio < 1:
+            priority = "medium"  # 进行中
+        else:
+            priority = "low"  # 已完成
+        
+        recommended_order.append({
+            "idx": ch["idx"],
+            "title": ch["title"],
+            "priority": priority,
+            "progress": f"{mastered}/{total}",
+            "status": "已完成" if mastered_ratio == 1 else ("进行中" if mastered_ratio > 0 else "未开始"),
+        })
+
+    # 按优先级排序
+    priority_order = {"high": 0, "medium": 1, "low": 2}
+    recommended_order.sort(key=lambda x: (priority_order.get(x["priority"], 3), x["idx"]))
+
+    # 生成下一步行动建议
+    percent = round(mastered_points / max(total_points, 1) * 100, 1)
+    
+    # 找到下一个推荐章节
+    next_chapter = next((ch for ch in recommended_order if ch["status"] != "已完成"), None)
+    
+    if percent < 30:
+        recommendation = f"建议从第{next_chapter['idx'] + 1}章「{next_chapter['title']}」开始学习"
+    elif percent < 50:
+        recommendation = f"继续学习第{next_chapter['idx'] + 1}章「{next_chapter['title']}」，完成更多掌握项"
+    elif percent < 100:
+        recommendation = f"还剩{len(pending)}个知识点未完成，继续加油！"
+    else:
+        recommendation = "恭喜！可以申请结业答辩了"
+
+    return {
+        "reading_mode": reading_mode,
+        "strategy_description": strategy.get(reading_mode, strategy["standard"]),
+        "knowledge_coverage": {
+            "total_points": total_points,
+            "mastered_points": mastered_points,
+            "percent": percent,
+        },
+        "chapter_stats": chapter_stats,
+        "recommended_order": recommended_order[:5],  # 推荐前5章
+        "weak_areas": weak_areas,
+        "recommendation": recommendation,
+        "next_chapter": next_chapter,  # 下一个推荐章节
+    }
+
+
+# ==================== 知识快照 API ====================
+@app.get("/api/courses/{course_id}/snapshots")
+async def get_chapter_snapshots(course_id: str):
+    """获取课程所有章节快照（速读模式）"""
+    snapshots = db.get_chapter_snapshots(course_id)
+    highlights = db.get_global_highlights(course_id)
+    return {
+        "snapshots": snapshots,
+        "highlights": highlights,
+    }
+
+
+@app.post("/api/courses/{course_id}/snapshots/generate")
+async def generate_snapshots(course_id: str):
+    """手动生成知识快照（速读模式）- 支持 EPUB 完整内容加载"""
+    course = db.get_course(course_id)
+    if not course:
+        raise HTTPException(404, "课程不存在")
+
+    chapters = db.get_chapters(course_id)
+    if not chapters:
+        raise HTTPException(400, "请先生成分章")
+
+    source_type = course.get("source_type", "")
+    source_path = course.get("source_path", "")
+
+    snapshots = []
+    failed_chapters = []
+
+    for ch in chapters:
+        # 加载章节内容（多种来源）
+        content = ch.get("content_slice", "") or ch.get("content_full", "")
+
+        # 如果内容太短且是EPUB，从EPUB重新加载完整内容
+        if source_type == "epub" and source_path and len(content) < 1000:
+            try:
+                from chunker import extract_chapter_content_by_href
+                # 找到对应的href
+                href = ch.get("href", "")
+                if href:
+                    full_content = await extract_chapter_content_by_href(source_path, href)
+                    if full_content:
+                        content = full_content
+            except Exception as e:
+                import logging
+                logging.warning(f"懒加载章节 {ch['idx']} 失败: {e}")
+
+        if not content or len(content.strip()) < 50:
+            failed_chapters.append(ch["idx"])
+            continue
+
+        try:
+            snapshot = await extract_chapter_snapshot(content, ch["title"])
+            snapshots.append(snapshot)
+            db.add_chapter_snapshot(
+                course_id, ch["idx"],
+                json.dumps(snapshot.get("keywords", []), ensure_ascii=False),
+                snapshot.get("core_viewpoint", ""),
+                global_priority=snapshot.get("importance", 0),
+                learning_goal=snapshot.get("learning_goal", ""),
+                importance=snapshot.get("importance", 0),
+                difficulty=snapshot.get("difficulty", ""),
+            )
+        except Exception as e:
+            import logging
+            logging.warning(f"生成章节 {ch['idx']} 快照失败: {e}")
+            failed_chapters.append(ch["idx"])
+
+    # 全局精华提炼
+    highlights_result = None
+    if snapshots:
+        chapter_titles = [ch["title"] for ch in chapters if ch["idx"] not in failed_chapters]
+        try:
+            highlights = await generate_global_highlights(course_id, snapshots, chapter_titles)
+            db.add_global_highlights(
+                course_id,
+                json.dumps(highlights.get("key_points", []), ensure_ascii=False),
+                json.dumps(highlights.get("chapter_priorities", []), ensure_ascii=False),
+                highlights.get("relationships", ""),
+                json.dumps(highlights.get("core_chapter_indices", []), ensure_ascii=False),
+                json.dumps(highlights.get("chapter_dependencies", {}), ensure_ascii=False),
+            )
+            highlights_result = {
+                "key_points_count": len(highlights.get("key_points", [])),
+                "core_chapters_count": len(highlights.get("core_chapter_indices", [])),
+                "is_fallback": highlights.get("_fallback", False),
+            }
+        except Exception as e:
+            import logging
+            logging.error(f"生成全局精华失败: {e}")
+
+    # 速读模式：生成精华掌握项
+    syllabus_count = 0
+    if snapshots:
+        try:
+            from chunker import generate_speed_read_syllabus
+            # 转换 chapters 格式给 generate_speed_read_syllabus
+            chapter_list = []
+            for ch in chapters:
+                content = ch.get("content_slice", "") or ch.get("content_full", "")
+                chapter_list.append((ch["title"], content, {"idx": ch["idx"]}))
+            syllabus_items = await generate_speed_read_syllabus(course_id, chapter_list, snapshots)
+            for ch_idx, desc in syllabus_items:
+                db.add_syllabus_item(course_id, ch_idx, desc)
+            syllabus_count = len(syllabus_items)
+        except Exception as e:
+            import logging
+            logging.error(f"生成精华掌握项失败: {e}")
+
+    return {
+        "snapshots_generated": len(snapshots),
+        "snapshots_failed": failed_chapters,
+        "highlights": highlights_result,
+        "syllabus_generated": syllabus_count,
+    }
+
+
+# ==================== 思辨笔记 API ====================
+@app.get("/api/courses/{course_id}/spiritual-notes")
+async def get_spiritual_notes(course_id: str):
+    """获取课程所有思辨笔记（研读模式）"""
+    notes = db.get_spiritual_notes(course_id)
+    # 获取章节标题
+    chapters = db.get_chapters(course_id)
+    chapter_map = {ch["idx"]: ch["title"] for ch in chapters}
+    for note in notes:
+        note["chapter_title"] = chapter_map.get(note["chapter_index"], f"第{note['chapter_index'] + 1}章")
+    return {"notes": notes}
+
+
+@app.post("/api/courses/{course_id}/spiritual-notes/generate")
+async def generate_spiritual_notes(course_id: str):
+    """为指定会话生成思辨笔记"""
+    data = await request.json()
+    session_id = data.get("session_id")
+    if not session_id:
+        raise HTTPException(400, "缺少 session_id")
+
+    session = db.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "会话不存在")
+
+    # 获取会话消息
+    messages = db.get_messages(session_id)
+    user_msgs = [m for m in messages if m["role"] == "user"]
+    assistant_msgs = [m for m in messages if m["role"] == "assistant"]
+
+    chapter = db.get_chapter(course_id, session["chapter_index"])
+    chapter_title = chapter.get("title", f"第{session['chapter_index'] + 1}章") if chapter else ""
+
+    prompt = f"""根据以下课堂对话，生成一份"思辨笔记"。
+
+章节：{chapter_title}
+
+学生回答：
+{chr(10).join(f"- {m['content'][:200]}" for m in user_msgs[-10:])}
+
+教师引导：
+{chr(10).join(f"- {m['content'][:200]}" for m in assistant_msgs[-10:])}
+
+笔记格式（只输出JSON）：
+{{"core_contradictions": ["...", "..."], "unresolved_questions": ["...", "..."], "extension_directions": ["...", "..."], "personal_reflection": "..."}}"""
+
+    try:
+        result = await llm.chat_json([
+            {"role": "system", "content": "你是思辨笔记生成助手。只返回JSON。"},
+            {"role": "user", "content": prompt},
+        ], temperature=0.3)
+
+        note_id = db.add_spiritual_note(
+            course_id=course_id,
+            session_id=session_id,
+            chapter_index=session["chapter_index"],
+            core_contradictions=json.dumps(result.get("core_contradictions", []), ensure_ascii=False),
+            unresolved_questions=json.dumps(result.get("unresolved_questions", []), ensure_ascii=False),
+            extension_directions=json.dumps(result.get("extension_directions", []), ensure_ascii=False),
+            personal_reflection=result.get("personal_reflection", ""),
+            raw_content=json.dumps(result, ensure_ascii=False),
+        )
+        return {"note_id": note_id, "content": result}
+    except Exception as e:
+        raise HTTPException(500, f"生成思辨笔记失败: {str(e)}")
+
+
+# ==================== 掌握进度 API ====================
+@app.get("/api/courses/{course_id}/mastery-progress")
+async def get_mastery_progress(course_id: str):
+    """获取课程掌握进度"""
+    progress = db.get_mastery_progress(course_id)
+    syllabus = db.get_syllabus_items(course_id)
+
+    # 合并实时数据
+    if syllabus:
+        progress["total"] = len(syllabus)
+        progress["mastered"] = [s["id"] for s in syllabus if s["status"] == "mastered"]
+        progress["pending"] = [s["id"] for s in syllabus if s["status"] == "pending"]
+        progress["in_progress"] = [s["id"] for s in syllabus if s["status"] == "in_progress"]
+
+        by_chapter = {}
+        for s in syllabus:
+            ch_idx = s["chapter_index"]
+            if ch_idx not in by_chapter:
+                by_chapter[ch_idx] = {"total": 0, "mastered": 0}
+            by_chapter[ch_idx]["total"] += 1
+            if s["status"] == "mastered":
+                by_chapter[ch_idx]["mastered"] += 1
+        progress["by_chapter"] = by_chapter
+
+    return progress
 
 
 # ==================== 健康检查 ====================

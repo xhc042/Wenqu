@@ -480,6 +480,9 @@ async function openCourse(courseId) {
                     </div>
                 </div>
                 <div style="display:flex;gap:8px">
+                    <button class="btn btn-outline btn-sm" onclick="showCourseOverview()">📊 全书总览</button>
+                    ${course.reading_mode === 'speed' ? '<button class="btn btn-outline btn-sm" onclick="showSnapshotsModal()">🚀 知识快照</button>' : ''}
+                    ${course.reading_mode === 'deep' ? '<button class="btn btn-outline btn-sm" onclick="showSpiritualNotesModal()">🧠 思辨笔记</button>' : ''}
                     <button class="btn btn-outline btn-sm" onclick="showContractModal()">📋 学习契约</button>
                     <button class="btn btn-outline btn-sm" onclick="showSlidersModal()">🎛️ 风格调控</button>
                     <button class="btn btn-outline btn-sm" onclick="switchView('model-config');loadModelConfig()">🔧 模型配置</button>
@@ -515,7 +518,7 @@ async function openCourse(courseId) {
         }
 
         // 章节列表（传入章节学习次数用于显示历史按钮）
-        renderChapters(data.chapters || [], data.syllabus || [], chapterSessionCounts);
+        renderChapters(data.chapters || [], data.syllabus || [], chapterSessionCounts, data.reading_mode);
 
         // 课后产出物
         renderPostClass(data);
@@ -531,7 +534,7 @@ async function openCourse(courseId) {
     }
 }
 
-function renderChapters(chapters, syllabus, chapterSessionCounts = {}) {
+function renderChapters(chapters, syllabus, chapterSessionCounts = {}, readingMode = null) {
     const list = document.getElementById('chapter-list');
     list.innerHTML = '';
 
@@ -539,6 +542,8 @@ function renderChapters(chapters, syllabus, chapterSessionCounts = {}) {
         list.innerHTML = '<div class="empty-state"><div class="empty-icon">📖</div><h3>暂无章节</h3><p>请先完成分章处理</p></div>';
         return;
     }
+
+    const isSpeedMode = readingMode === 'speed';
 
     // 构建树形结构
     const tree = buildChapterTree(chapters);
@@ -563,39 +568,61 @@ function renderChapters(chapters, syllabus, chapterSessionCounts = {}) {
 
             const sessionCount = chapterSessionCounts[ch.idx] || 0;
 
-            div.innerHTML = `
-                <div class="chapter-index">${levelIcon}</div>
-                <div class="chapter-info">
-                    <div class="chapter-title" style="font-weight:${depth <= 1 ? '600' : '400'}">
-                        ${ch.title}
-                        ${!isLoaded ? '<span class="tag tag-pending" style="font-size:11px;margin-left:6px">⏳ 未加载</span>' : ''}
-                        ${isLoaded && ch.summary ? '<span style="font-size:11px;color:#636e72;display:block;margin-top:2px">' + ch.summary.slice(0, 60) + '</span>' : ''}
+            // 速读模式：简洁展示
+            if (isSpeedMode) {
+                div.innerHTML = `
+                    <div class="chapter-index">${levelIcon}</div>
+                    <div class="chapter-info">
+                        <div class="chapter-title" style="font-weight:${depth <= 1 ? '600' : '400'}">
+                            ${ch.title}
+                        </div>
+                        <div class="chapter-items-count" style="color:#636e72;font-size:12px">
+                            ${sessionCount > 0 ? `<span style="color:var(--success)">✅ 已学习 ${sessionCount} 次</span>` : '<span>💡 快速浏览即可</span>'}
+                        </div>
                     </div>
-                    <div class="chapter-items-count">
-                        ${(() => {
-                            const wordCount = ch.content_slice ? ch.content_slice.length : 0;
-                            const wordStr = wordCount >= 1000 ? (wordCount / 1000).toFixed(1) + 'k' : wordCount.toString();
-                            const wordDisplay = wordCount > 0 ? `<span style="color:#636e72;font-size:11px;margin-right:8px">📝 ${wordStr}字</span>` : '';
-                            const masteryDisplay = total > 0 ? `${mastered}/${total} 项掌握` : (isLoaded ? '暂无掌握项' : '点击"开始学习"加载内容');
-                            return wordDisplay + masteryDisplay;
-                        })()}
-                        <span style="margin-left:8px">
-                            ${chapterSyllabus.map(s => {
-                            const displayText = s.description.slice(0, 60) + (s.description.length > 60 ? '...' : '');
-                            const isMastered = s.status === 'mastered';
-                            return `<span class="tag tag-${isMastered ? 'mastered' : s.status === 'in_progress' ? 'progress' : 'pending'}" style="margin:0 2px;cursor:pointer;font-size:11px" title="${s.description}" onclick="viewSyllabusDetail(${s.id}, this.title)">${displayText}${isMastered ? ' ✅' : ''}</span>` +
-                                (isMastered ? '' : `<button class="btn btn-xs" style="font-size:10px;padding:0 4px;margin-left:1px;vertical-align:middle;border:none;background:var(--success);color:#fff;border-radius:3px;cursor:pointer" onclick="event.stopPropagation();markSyllabusMastered(${s.id}, this)" title="标记为已掌握">✓</button>`);
-                        }).join(' ')}
-                        </span>
+                    <div class="chapter-actions">
+                        ${sessionCount > 0 ? `<button class="btn btn-outline btn-sm chapter-history-btn" onclick="event.stopPropagation();showChapterHistory(${ch.idx})" title="查看学习历史">📜</button>` : ''}
+                        <button class="btn btn-outline btn-sm" onclick="startChat(${ch.idx})">
+                            ${sessionCount > 0 ? '再次学习' : '快速浏览'}
+                        </button>
                     </div>
-                </div>
-                <div class="chapter-actions">
-                    ${sessionCount > 0 ? `<button class="btn btn-outline btn-sm chapter-history-btn" onclick="event.stopPropagation();showChapterHistory(${ch.idx})" title="查看学习历史(${sessionCount}次)">📜 ${sessionCount}</button>` : ''}
-                    <button class="btn btn-primary btn-sm" onclick="startChat(${ch.idx})">
-                        ${!isLoaded ? '⏳ 加载并学习' : '开始学习'}
-                    </button>
-                </div>
-            `;
+                `;
+            } else {
+                // 细读/研读模式：完整展示
+                div.innerHTML = `
+                    <div class="chapter-index">${levelIcon}</div>
+                    <div class="chapter-info">
+                        <div class="chapter-title" style="font-weight:${depth <= 1 ? '600' : '400'}">
+                            ${ch.title}
+                            ${!isLoaded ? '<span class="tag tag-pending" style="font-size:11px;margin-left:6px">⏳ 未加载</span>' : ''}
+                            ${isLoaded && ch.summary ? '<span style="font-size:11px;color:#636e72;display:block;margin-top:2px">' + ch.summary.slice(0, 60) + '</span>' : ''}
+                        </div>
+                        <div class="chapter-items-count">
+                            ${(() => {
+                                const wordCount = ch.content_slice ? ch.content_slice.length : 0;
+                                const wordStr = wordCount >= 1000 ? (wordCount / 1000).toFixed(1) + 'k' : wordCount.toString();
+                                const wordDisplay = wordCount > 0 ? `<span style="color:#636e72;font-size:11px;margin-right:8px">📝 ${wordStr}字</span>` : '';
+                                const masteryDisplay = total > 0 ? `${mastered}/${total} 项掌握` : (isLoaded ? '暂无掌握项' : '点击"开始学习"加载内容');
+                                return wordDisplay + masteryDisplay;
+                            })()}
+                            <span style="margin-left:8px">
+                                ${chapterSyllabus.map(s => {
+                                const displayText = s.description.slice(0, 60) + (s.description.length > 60 ? '...' : '');
+                                const isMastered = s.status === 'mastered';
+                                return `<span class="tag tag-${isMastered ? 'mastered' : s.status === 'in_progress' ? 'progress' : 'pending'}" style="margin:0 2px;cursor:pointer;font-size:11px" title="${s.description}" onclick="viewSyllabusDetail(${s.id}, this.title)">${displayText}${isMastered ? ' ✅' : ''}</span>` +
+                                    (isMastered ? '' : `<button class="btn btn-xs" style="font-size:10px;padding:0 4px;margin-left:1px;vertical-align:middle;border:none;background:var(--success);color:#fff;border-radius:3px;cursor:pointer" onclick="event.stopPropagation();markSyllabusMastered(${s.id}, this)" title="标记为已掌握">✓</button>`);
+                            }).join(' ')}
+                            </span>
+                        </div>
+                    </div>
+                    <div class="chapter-actions">
+                        ${sessionCount > 0 ? `<button class="btn btn-outline btn-sm chapter-history-btn" onclick="event.stopPropagation();showChapterHistory(${ch.idx})" title="查看学习历史(${sessionCount}次)">📜 ${sessionCount}</button>` : ''}
+                        <button class="btn btn-primary btn-sm" onclick="startChat(${ch.idx})">
+                            ${!isLoaded ? '⏳ 加载并学习' : '开始学习'}
+                        </button>
+                    </div>
+                `;
+            }
             list.appendChild(div);
 
             // 递归渲染子节点
@@ -2772,5 +2799,754 @@ function showSocraticPreview(preview) {
 }
 
 // escapeHtml 已在第1009行定义，此处复用
+
+// ==================== 全书总览弹窗 ====================
+function showCourseOverview() {
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay active';
+    modal.style.zIndex = '2000';
+    modal.onclick = function(e) { if (e.target === modal) modal.remove(); };
+
+    const container = document.createElement('div');
+    container.className = 'modal';
+    container.style.maxWidth = '700px';
+    container.style.maxHeight = '80vh';
+    container.style.overflow = 'auto';
+    container.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px"><h2>📊 全书总览</h2><button class="btn btn-outline btn-sm" onclick="this.closest(\'.modal-overlay\').remove()">✕</button></div><div id="course-overview-modal" style="min-height:200px;text-align:center;color:var(--text-secondary)">加载中...</div>';
+
+    modal.appendChild(container);
+    document.body.appendChild(modal);
+
+    loadCourseOverviewModal();
+}
+
+// ==================== 速读模式：知识快照弹窗 ====================
+function showSnapshotsModal() {
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay active';
+    modal.style.zIndex = '2000';
+    modal.onclick = function(e) { if (e.target === modal) modal.remove(); };
+
+    const container = document.createElement('div');
+    container.className = 'modal';
+    container.style.maxWidth = '800px';
+    container.style.maxHeight = '85vh';
+    container.style.overflow = 'auto';
+    container.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px"><h2>🚀 知识快照</h2><button class="btn btn-outline btn-sm" onclick="this.closest(\'.modal-overlay\').remove()">✕</button></div><div id="snapshots-modal-content" style="min-height:200px;text-align:center;color:var(--text-secondary)">加载中...</div>';
+
+    modal.appendChild(container);
+    document.body.appendChild(modal);
+
+    loadSnapshotsModal();
+}
+
+async function loadSnapshotsModal() {
+    if (!AppState.currentCourseId) return;
+    try {
+        const data = await API.get(`/api/courses/${AppState.currentCourseId}/snapshots`);
+        renderSnapshotsModal(data.snapshots || [], data.highlights);
+    } catch (e) {
+        console.error('加载知识快照失败', e);
+        document.getElementById('snapshots-modal-content').innerHTML = '<div style="color:var(--danger)">加载失败</div>';
+    }
+}
+
+function renderSnapshotsModal(snapshots, highlights) {
+    const container = document.getElementById('snapshots-modal-content');
+    if (!container) return;
+
+    if (!snapshots || snapshots.length === 0) {
+        container.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-secondary)">暂无知识快照<br><br>速读模式分章后会自动生成</div>';
+        return;
+    }
+
+    let html = '';
+
+    // 全局精华
+    if (highlights && highlights.key_points && highlights.key_points.length > 0) {
+        html += `
+            <div class="highlights-card" style="margin-bottom:20px">
+                <h3 style="color:var(--accent);margin-bottom:12px">📊 全书核心知识点</h3>
+                <div style="display:flex;flex-direction:column;gap:8px">
+                    ${highlights.key_points.map((point, i) => `
+                        <div style="display:flex;align-items:flex-start;gap:8px;padding:8px 12px;background:var(--bg-secondary);border-radius:8px;border-left:3px solid ${i < 3 ? 'var(--accent)' : 'var(--border)'}">
+                            <span style="font-size:11px;padding:2px 8px;border-radius:4px;font-weight:600;white-space:nowrap;background:${i < 3 ? 'rgba(108,92,231,0.15)' : 'rgba(99,110,114,0.15)'};color:${i < 3 ? 'var(--accent)' : 'var(--text-secondary)'}">${i < 3 ? '🔥 核心' : '📌 重要'}</span>
+                            <span style="font-size:14px">${escapeHtml(point)}</span>
+                        </div>
+                    `).join('')}
+                </div>
+                ${highlights.chapter_priorities && highlights.chapter_priorities.length > 0 ? `
+                    <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+                        <h4 style="font-size:14px;margin-bottom:8px">📚 推荐学习顺序</h4>
+                        <ol style="padding-left:20px">${highlights.chapter_priorities.map(p => `<li style="margin-bottom:4px">${escapeHtml(p)}</li>`).join('')}</ol>
+                    </div>
+                ` : ''}
+            </div>
+        `;
+    }
+
+    // 章节快照
+    html += '<h3 style="margin-bottom:12px">📑 各章知识快照</h3>';
+    html += '<div style="display:flex;flex-direction:column;gap:12px">';
+    html += snapshots.map(s => `
+        <div style="background:var(--bg-secondary);border-radius:12px;padding:16px;box-shadow:0 2px 8px rgba(0,0,0,0.05)">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+                <span style="font-weight:600;color:var(--accent)">第${s.chapter_index + 1}章</span>
+                ${s.core_viewpoint ? `<span style="font-size:13px;color:var(--text-secondary);flex:1;text-align:right;margin-left:12px">${escapeHtml(s.core_viewpoint)}</span>` : ''}
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px">
+                ${(s.keywords || []).map(k => `<span style="font-size:12px;padding:4px 10px;background:rgba(108,92,231,0.1);color:var(--accent);border-radius:12px">${escapeHtml(k)}</span>`).join('')}
+            </div>
+        </div>
+    `).join('');
+    html += '</div>';
+
+    container.innerHTML = html;
+}
+
+async function loadCourseOverviewModal() {
+    if (!AppState.currentCourseId) return;
+    try {
+        const overview = await API.get(`/api/courses/${AppState.currentCourseId}/overview`);
+        renderCourseOverviewModal(overview);
+    } catch (e) {
+        console.error('加载课程概览失败', e);
+        document.getElementById('course-overview-modal').innerHTML = '<div style="color:var(--danger)">加载失败</div>';
+    }
+}
+
+function renderCourseOverviewModal(overview) {
+    const container = document.getElementById('course-overview-modal');
+    if (!container) return;
+
+    const coverage = overview.knowledge_coverage || { total_points: 0, mastered_points: 0, percent: 0 };
+    const percent = coverage.percent || 0;
+    const circumference = 2 * Math.PI * 45;
+    const offset = circumference - (circumference * percent / 100);
+
+    // 速读模式显示快照数量，其他模式显示知识点数量
+    const isSpeedMode = overview.reading_mode === 'speed';
+    const totalLabel = isSpeedMode ? '快照数' : '知识点';
+    const totalCount = coverage.total_points || 0;
+    const masteredCount = coverage.mastered_points || 0;
+
+    let html = `
+        <div class="overview-strategy">
+            <span class="strategy-badge">${escapeHtml(overview.strategy_description || '')}</span>
+        </div>
+
+        <div class="overview-coverage">
+            <div class="coverage-circle">
+                <svg viewBox="0 0 100 100">
+                    <circle cx="50" cy="50" r="45" fill="none" stroke="#dfe6e9" stroke-width="8"/>
+                    <circle cx="50" cy="50" r="45" fill="none"
+                            stroke="var(--accent)" stroke-width="8"
+                            stroke-dasharray="${circumference}"
+                            stroke-dashoffset="${offset}"
+                            transform="rotate(-90 50 50)"/>
+                </svg>
+                <span class="coverage-number">${percent}%</span>
+            </div>
+            <p>${isSpeedMode ? '已生成' : '已掌握'} ${masteredCount}/${totalCount} 个${totalLabel}</p>
+            ${coverage.total_chapters ? `<p style="font-size:12px;color:var(--text-secondary)">全书共 ${coverage.total_chapters} 章</p>` : ''}
+        </div>
+
+        <div class="overview-chapters">
+            <h3 style="margin:16px 0 12px;font-size:15px">章节掌握情况</h3>
+    `;
+
+    (overview.chapter_stats || []).forEach(ch => {
+        const chPercent = ch.total > 0 ? Math.round(ch.mastered / ch.total * 100) : 0;
+        html += `
+            <div class="chapter-stat-row">
+                <span class="chapter-name">${escapeHtml(ch.title || `第${ch.idx + 1}章`)}</span>
+                <div class="progress-bar-mini">
+                    <div class="progress-bar-mini-fill" style="width:${chPercent}%"></div>
+                </div>
+                <span class="chapter-count">${ch.mastered}/${ch.total}</span>
+            </div>
+        `;
+    });
+
+    html += '</div>';
+
+    if (overview.weak_areas && overview.weak_areas.length > 0) {
+        html += `
+            <div class="overview-weak">
+                <h3 style="margin:16px 0 8px;font-size:14px;color:var(--warning)">${isSpeedMode ? '⚠️ 未学习章节' : '⚠️ 薄弱环节'}</h3>
+        `;
+        overview.weak_areas.forEach(w => {
+            html += `<div class="weak-item">${escapeHtml(w.description)} <span class="weak-tag">${w.status || ''}</span></div>`;
+        });
+        html += '</div>';
+    }
+
+    // 智能学习顺序推荐（速读模式：三级推荐；其他模式：简单列表）
+    if (overview.recommended_order) {
+        if (isSpeedMode && typeof overview.recommended_order === 'object' && !Array.isArray(overview.recommended_order)) {
+            // 速读模式：三级推荐（已学/核心待学/可选）
+            const order = overview.recommended_order;
+            html += `
+                <div class="overview-recommended">
+                    <h3 style="margin:16px 0 8px;font-size:14px;color:var(--accent)">
+                        📚 智能学习路径
+                        <span style="font-size:11px;color:var(--text-secondary);font-weight:normal;margin-left:8px">
+                            核心 ${order.core_count || 0} / 总 ${order.total_count || 0} 章
+                        </span>
+                    </h3>
+            `;
+
+            // 已学章节
+            if (order.learned && order.learned.length > 0) {
+                html += `
+                    <div style="margin-bottom:12px">
+                        <div style="font-size:12px;color:var(--success);margin-bottom:6px">✅ 已学习 (${order.learned.length})</div>
+                `;
+                order.learned.forEach(ch => {
+                    html += `
+                        <div style="display:flex;align-items:center;gap:8px;padding:6px 12px;background:rgba(0,206,201,0.05);border-radius:6px;margin-bottom:4px">
+                            <span style="font-size:13px;color:var(--text-secondary)">第${ch.idx + 1}章</span>
+                            <span style="flex:1;font-size:13px;color:var(--text-secondary);text-decoration:line-through">${escapeHtml(ch.title || '')}</span>
+                            ${ch.importance ? `<span style="font-size:11px;color:var(--text-secondary)">${'⭐'.repeat(ch.importance)}</span>` : ''}
+                        </div>
+                    `;
+                });
+                html += '</div>';
+            }
+
+            // 核心待学章节
+            if (order.core_to_learn && order.core_to_learn.length > 0) {
+                html += `
+                    <div style="margin-bottom:12px">
+                        <div style="font-size:12px;color:var(--danger);margin-bottom:6px">🔥 核心待学 (${order.core_to_learn.length})</div>
+                `;
+                order.core_to_learn.forEach((ch, idx) => {
+                    const depsBadge = ch.deps_satisfied
+                        ? '<span style="font-size:10px;color:var(--success)">✓ 可学</span>'
+                        : '<span style="font-size:10px;color:var(--warning)">⏳ 需先学</span>';
+                    html += `
+                        <div style="display:flex;flex-direction:column;gap:4px;padding:10px 12px;background:rgba(255,107,107,0.05);border-radius:8px;margin-bottom:6px;border-left:3px solid var(--danger)">
+                            <div style="display:flex;align-items:center;gap:8px">
+                                <span style="font-size:14px;font-weight:bold;color:var(--danger)">${idx + 1}.</span>
+                                <span style="flex:1;font-size:14px;font-weight:500">第${ch.idx + 1}章「${escapeHtml(ch.title || '')}」</span>
+                                ${ch.importance ? `<span style="font-size:11px">${'⭐'.repeat(ch.importance)}</span>` : ''}
+                                ${depsBadge}
+                            </div>
+                            ${ch.learning_goal ? `<div style="font-size:12px;color:var(--text-secondary);margin-left:24px">🎯 ${escapeHtml(ch.learning_goal)}</div>` : ''}
+                            ${ch.dependencies && ch.dependencies.length > 0 ? `<div style="font-size:11px;color:var(--text-secondary);margin-left:24px">📎 依赖: 第${ch.dependencies.map(d => d+1).join('、')}章</div>` : ''}
+                        </div>
+                    `;
+                });
+                html += '</div>';
+            }
+
+            // 可选章节
+            if (order.optional && order.optional.length > 0) {
+                html += `
+                    <div>
+                        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px">📚 可选阅读 (${order.optional.length})</div>
+                `;
+                order.optional.slice(0, 3).forEach(ch => {
+                    html += `
+                        <div style="display:flex;align-items:center;gap:8px;padding:6px 12px;background:var(--bg-secondary);border-radius:6px;margin-bottom:4px;opacity:0.7">
+                            <span style="font-size:13px;color:var(--text-secondary)">第${ch.idx + 1}章</span>
+                            <span style="flex:1;font-size:13px;color:var(--text-secondary)">${escapeHtml(ch.title || '')}</span>
+                            ${ch.importance ? `<span style="font-size:11px">${'⭐'.repeat(ch.importance)}</span>` : ''}
+                        </div>
+                    `;
+                });
+                if (order.optional.length > 3) {
+                    html += `<div style="font-size:11px;color:var(--text-secondary);padding:4px 12px">还有 ${order.optional.length - 3} 章可选...</div>`;
+                }
+                html += '</div>';
+            }
+
+            html += '</div>';
+        } else if (Array.isArray(overview.recommended_order) && overview.recommended_order.length > 0) {
+            // 细读/研读模式：简单列表
+            html += `
+                <div class="overview-recommended">
+                    <h3 style="margin:16px 0 8px;font-size:14px;color:var(--accent)">📚 推荐学习顺序</h3>
+            `;
+            overview.recommended_order.forEach((ch, idx) => {
+                const priorityBadge = ch.priority === 'high' ? '🔥' : (ch.priority === 'medium' ? '📖' : '✅');
+                const statusBadge = ch.status === '已完成' ? '✅' : (ch.status === '进行中' ? '🔄' : '📝');
+                html += `
+                    <div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)">
+                        <span style="font-size:16px;font-weight:bold;color:var(--text-secondary)">${idx + 1}.</span>
+                        <span style="flex:1;font-size:13px">${escapeHtml(ch.title || `第${ch.idx + 1}章`)}</span>
+                        <span style="font-size:11px">${priorityBadge}</span>
+                        <span style="font-size:11px;color:${ch.status === '已完成' ? 'var(--success)' : 'var(--text-secondary)'}">${statusBadge} ${ch.status || ''}</span>
+                        ${ch.progress ? `<span style="font-size:11px;color:var(--text-secondary)">${ch.progress}</span>` : ''}
+                    </div>
+                `;
+            });
+            html += '</div>';
+        }
+    }
+
+    // 下一个推荐章节（速读模式：基于三级推荐）
+    let nextCh = overview.next_chapter;
+    if (isSpeedMode && overview.recommended_order && !Array.isArray(overview.recommended_order)) {
+        nextCh = overview.recommended_order.next_chapter;
+    }
+
+    if (nextCh && (Array.isArray(overview.recommended_order) || isSpeedMode)) {
+        const showNext = isSpeedMode
+            ? (nextCh && (nextCh.idx !== undefined))
+            : (nextCh && nextCh.status !== '已完成');
+
+        if (showNext) {
+            html += `
+                <div class="overview-next" style="margin-top:16px;padding:12px;background:linear-gradient(135deg,rgba(108,92,231,0.1),rgba(108,92,231,0.05));border-radius:12px;border:1px solid var(--accent)">
+                    <h3 style="margin:0 0 8px;font-size:14px;color:var(--accent)">🎯 下一步推荐</h3>
+                    <p style="margin:0;font-size:14px">
+                        <strong>第${nextCh.idx + 1}章「${escapeHtml(nextCh.title || '')}」</strong>
+                        ${nextCh.progress ? `<span style="color:var(--text-secondary)"> (${nextCh.progress})</span>` : ''}
+                    </p>
+                    ${nextCh.learning_goal ? `<p style="margin:4px 0 0;font-size:12px;color:var(--text-secondary)">🎯 ${escapeHtml(nextCh.learning_goal)}</p>` : ''}
+                </div>
+            `;
+        }
+    }
+
+    if (overview.recommendation) {
+        html += `
+            <div class="overview-recommendation">
+                <h3 style="margin:16px 0 8px;font-size:14px">💡 建议</h3>
+                <p>${escapeHtml(overview.recommendation)}</p>
+            </div>
+        `;
+    }
+
+    // 速读模式：显示全局精华按钮
+    if (isSpeedMode && overview.highlights) {
+        const h = overview.highlights;
+        if (h.key_points && h.key_points.length > 0) {
+            html += `
+                <div style="margin-top:20px;padding:16px;background:linear-gradient(135deg, rgba(108,92,231,0.08), rgba(6,214,160,0.08));border-radius:12px">
+                    <h3 style="margin-bottom:12px;font-size:15px">🔥 全书核心知识点</h3>
+            `;
+            h.key_points.slice(0, 5).forEach((point, i) => {
+                html += `<div style="margin-bottom:8px;font-size:14px;padding:8px;background:white;border-radius:8px">${i < 3 ? '🔥' : '📌'} ${escapeHtml(point)}</div>`;
+            });
+            html += '</div>';
+        }
+    }
+
+    container.innerHTML = html;
+}
+
+// ==================== 研读模式：思辨笔记弹窗 ====================
+function showSpiritualNotesModal() {
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay active';
+    modal.style.zIndex = '2000';
+    modal.onclick = function(e) { if (e.target === modal) modal.remove(); };
+
+    const container = document.createElement('div');
+    container.className = 'modal';
+    container.style.maxWidth = '800px';
+    container.style.maxHeight = '85vh';
+    container.style.overflow = 'auto';
+    container.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px"><h2>🧠 思辨笔记</h2><button class="btn btn-outline btn-sm" onclick="this.closest(\'.modal-overlay\').remove()">✕</button></div><div id="spiritual-notes-modal-content" style="min-height:200px;text-align:center;color:var(--text-secondary)">加载中...</div>';
+
+    modal.appendChild(container);
+    document.body.appendChild(modal);
+
+    loadSpiritualNotesModal();
+}
+
+async function loadSpiritualNotesModal() {
+    if (!AppState.currentCourseId) return;
+    try {
+        const data = await API.get(`/api/courses/${AppState.currentCourseId}/spiritual-notes`);
+        renderSpiritualNotesModal(data.notes || []);
+    } catch (e) {
+        console.error('加载思辨笔记失败', e);
+        document.getElementById('spiritual-notes-modal-content').innerHTML = '<div style="color:var(--danger)">加载失败</div>';
+    }
+}
+
+function renderSpiritualNotesModal(notes) {
+    const container = document.getElementById('spiritual-notes-modal-content');
+    if (!container) return;
+
+    if (!notes || notes.length === 0) {
+        container.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-secondary)">暂无思辨笔记<br><br>研读模式学习结束后会自动生成</div>';
+        return;
+    }
+
+    let html = '';
+    html += '<div style="display:flex;flex-direction:column;gap:16px">';
+    notes.forEach(note => {
+        html += `
+            <div style="background:var(--bg-secondary);border-radius:12px;padding:20px;box-shadow:0 2px 8px rgba(0,0,0,0.05);border-left:4px solid var(--warning)">
+                <h3 style="margin-bottom:16px;font-size:16px">📖 ${note.chapter_title || '第' + (note.chapter_index + 1) + '章'}</h3>
+        `;
+
+        if (note.core_contradictions && note.core_contradictions.length > 0) {
+            html += `
+                <div style="margin-bottom:12px">
+                    <h4 style="font-size:13px;color:var(--text-secondary);margin-bottom:8px">⚡ 核心矛盾点</h4>
+                    <ul style="padding-left:20px;font-size:14px;line-height:1.7">
+                        ${note.core_contradictions.map(c => `<li style="margin-bottom:4px">${escapeHtml(c)}</li>`).join('')}
+                    </ul>
+                </div>
+            `;
+        }
+
+        if (note.unresolved_questions && note.unresolved_questions.length > 0) {
+            html += `
+                <div style="margin-bottom:12px">
+                    <h4 style="font-size:13px;color:var(--text-secondary);margin-bottom:8px">❓ 未解决问题</h4>
+                    <ul style="padding-left:20px;font-size:14px;line-height:1.7">
+                        ${note.unresolved_questions.map(q => `<li style="margin-bottom:4px">${escapeHtml(q)}</li>`).join('')}
+                    </ul>
+                </div>
+            `;
+        }
+
+        if (note.extension_directions && note.extension_directions.length > 0) {
+            html += `
+                <div style="margin-bottom:12px">
+                    <h4 style="font-size:13px;color:var(--text-secondary);margin-bottom:8px">💡 延伸思考方向</h4>
+                    <ul style="padding-left:20px;font-size:14px;line-height:1.7">
+                        ${note.extension_directions.map(d => `<li style="margin-bottom:4px">${escapeHtml(d)}</li>`).join('')}
+                    </ul>
+                </div>
+            `;
+        }
+
+        if (note.personal_reflection) {
+            html += `
+                <div>
+                    <h4 style="font-size:13px;color:var(--text-secondary);margin-bottom:8px">💭 个人反思</h4>
+                    <p style="font-size:14px;line-height:1.7">${escapeHtml(note.personal_reflection)}</p>
+                </div>
+            `;
+        }
+
+        html += '</div>';
+    });
+    html += '</div>';
+
+    container.innerHTML = html;
+}
+
+// ==================== 速读模式：知识快照展示 ====================
+async function loadSnapshots() {
+    if (!AppState.currentCourseId) return;
+    try {
+        const data = await API.get(`/api/courses/${AppState.currentCourseId}/snapshots`);
+        renderSnapshots(data.snapshots || [], data.highlights);
+    } catch (e) {
+        console.error('加载知识快照失败', e);
+    }
+}
+
+function renderSnapshots(snapshots, highlights) {
+    const container = document.getElementById('snapshot-container');
+    if (!container) return;
+
+    if (!snapshots || snapshots.length === 0) {
+        container.innerHTML = '<div style="color:var(--text-secondary);padding:20px;text-align:center">暂无知识快照</div>';
+        return;
+    }
+
+    let html = '<div class="snapshot-section">';
+
+    // 全局精华
+    if (highlights) {
+        html += `
+            <div class="highlights-card">
+                <h3>📊 全书核心知识点</h3>
+                <div class="key-points-list">
+                    ${(highlights.key_points || []).map((point, i) => `
+                        <div class="key-point-item ${i < 3 ? 'priority-high' : 'priority-normal'}">
+                            <span class="priority-badge">${i < 3 ? '🔥 核心' : '📌 重要'}</span>
+                            <span class="point-desc">${escapeHtml(point)}</span>
+                        </div>
+                    `).join('')}
+                </div>
+                ${highlights.chapter_priorities && highlights.chapter_priorities.length > 0 ? `
+                    <div class="chapter-priorities">
+                        <h4>📚 推荐学习顺序</h4>
+                        <ol>${highlights.chapter_priorities.map(p => `<li>${escapeHtml(p)}</li>`).join('')}</ol>
+                    </div>
+                ` : ''}
+                ${highlights.relationships ? `<div class="relationships">${escapeHtml(highlights.relationships)}</div>` : ''}
+            </div>
+        `;
+    }
+
+    // 章节快照
+    html += '<h3 style="margin-top:20px">📑 各章知识快照</h3>';
+    html += snapshots.map(s => `
+        <div class="snapshot-card">
+            <div class="snapshot-header">
+                <span class="chapter-title">第${s.chapter_index + 1}章</span>
+                ${s.core_viewpoint ? `<span class="core-viewpoint">${escapeHtml(s.core_viewpoint)}</span>` : ''}
+            </div>
+            <div class="snapshot-keywords">
+                ${(s.keywords || []).map(k => `<span class="keyword-tag">${escapeHtml(k)}</span>`).join('')}
+            </div>
+        </div>
+    `).join('');
+
+    html += '</div>';
+    container.innerHTML = html;
+}
+
+// ==================== 研读模式：思辨笔记 ====================
+async function loadSpiritualNotes() {
+    if (!AppState.currentCourseId) return;
+    try {
+        const data = await API.get(`/api/courses/${AppState.currentCourseId}/spiritual-notes`);
+        renderSpiritualNotes(data.notes || []);
+    } catch (e) {
+        console.error('加载思辨笔记失败', e);
+    }
+}
+
+function renderSpiritualNotes(notes) {
+    const container = document.getElementById('spiritual-notes-container');
+    if (!container) return;
+
+    if (!notes || notes.length === 0) {
+        container.innerHTML = '<div style="color:var(--text-secondary);padding:20px;text-align:center">暂无思辨笔记</div>';
+        return;
+    }
+
+    container.innerHTML = notes.map(note => `
+        <div class="spiritual-note-card">
+            <h4>🧠 ${note.chapter_title || '未知章节'} - 思辨笔记</h4>
+            ${note.core_contradictions && note.core_contradictions.length > 0 ? `
+                <div class="note-section">
+                    <h5>核心矛盾点</h5>
+                    <ul>${note.core_contradictions.map(c => `<li>${escapeHtml(c)}</li>`).join('')}</ul>
+                </div>
+            ` : ''}
+            ${note.unresolved_questions && note.unresolved_questions.length > 0 ? `
+                <div class="note-section">
+                    <h5>未解决问题</h5>
+                    <ul>${note.unresolved_questions.map(q => `<li>${escapeHtml(q)}</li>`).join('')}</ul>
+                </div>
+            ` : ''}
+            ${note.extension_directions && note.extension_directions.length > 0 ? `
+                <div class="note-section">
+                    <h5>延伸思考方向</h5>
+                    <ul>${note.extension_directions.map(d => `<li>${escapeHtml(d)}</li>`).join('')}</ul>
+                </div>
+            ` : ''}
+            ${note.personal_reflection ? `
+                <div class="note-section">
+                    <h5>个人反思</h5>
+                    <p>${escapeHtml(note.personal_reflection)}</p>
+                </div>
+            ` : ''}
+        </div>
+    `).join('');
+}
+
+// ==================== 知识掌握度仪表盘 ====================
+async function loadMasteryDashboard() {
+    if (!AppState.currentCourseId) return;
+    try {
+        const progress = await API.get(`/api/courses/${AppState.currentCourseId}/mastery-progress`);
+        renderMasteryDashboard(progress);
+    } catch (e) {
+        console.error('加载掌握进度失败', e);
+    }
+}
+
+function renderMasteryDashboard(progress) {
+    const container = document.getElementById('mastery-dashboard');
+    if (!container) return;
+
+    const total = progress.total || 0;
+    const mastered = progress.mastered?.length || 0;
+    const inProgress = progress.in_progress?.length || 0;
+    const pending = progress.pending?.length || 0;
+    const percent = total > 0 ? Math.round(mastered / total * 100) : 0;
+
+    container.innerHTML = `
+        <div class="mastery-header">
+            <h3>📊 知识掌握进度</h3>
+            <span class="mastery-percent">${percent}%</span>
+        </div>
+        <div class="progress-bar-outer" style="margin:12px 0">
+            <div class="progress-bar-inner" style="width:${percent}%"></div>
+        </div>
+        <div class="mastery-stats">
+            <span class="stat mastered">✅ 已掌握 ${mastered}</span>
+            <span class="stat in-progress">🔄 进行中 ${inProgress}</span>
+            <span class="stat pending">⏳ 待学习 ${pending}</span>
+        </div>
+        <div id="chapter-breakdown" class="chapter-breakdown"></div>
+    `;
+
+    // 章节明细
+    const byChapter = progress.by_chapter || {};
+    const breakdownContainer = document.getElementById('chapter-breakdown');
+    if (breakdownContainer && Object.keys(byChapter).length > 0) {
+        let html = '<h4 style="margin-top:16px;font-size:13px;color:var(--text-secondary)">各章掌握情况</h4>';
+        Object.entries(byChapter).forEach(([chIdx, stats]) => {
+            const chPercent = stats.total > 0 ? Math.round(stats.mastered / stats.total * 100) : 0;
+            html += `
+                <div class="chapter-progress">
+                    <span>第${parseInt(chIdx) + 1}章</span>
+                    <div class="progress-bar-mini">
+                        <div class="progress-bar-mini-fill" style="width:${chPercent}%"></div>
+                    </div>
+                    <span>${stats.mastered}/${stats.total}</span>
+                </div>
+            `;
+        });
+        breakdownContainer.innerHTML = html;
+    }
+}
+
+// ==================== 全书总览视图 ====================
+async function loadCourseOverview() {
+    if (!AppState.currentCourseId) return;
+    try {
+        const overview = await API.get(`/api/courses/${AppState.currentCourseId}/overview`);
+        renderCourseOverview(overview);
+    } catch (e) {
+        console.error('加载课程概览失败', e);
+    }
+}
+
+function renderCourseOverview(overview) {
+    const container = document.getElementById('course-overview');
+    if (!container) return;
+
+    const coverage = overview.knowledge_coverage || { total_points: 0, mastered_points: 0, percent: 0 };
+    const percent = coverage.percent || 0;
+
+    // 计算圆环进度
+    const circumference = 2 * Math.PI * 45;
+    const offset = circumference - (circumference * percent / 100);
+
+    let html = `
+        <div class="overview-header">
+            <h2>📊 课程学习概览</h2>
+            <span class="strategy-badge">${escapeHtml(overview.strategy_description || '')}</span>
+        </div>
+
+        <div class="knowledge-coverage">
+            <h3>知识点掌握率</h3>
+            <div class="coverage-circle">
+                <svg viewBox="0 0 100 100">
+                    <circle cx="50" cy="50" r="45" fill="none" stroke="#dfe6e9" stroke-width="8"/>
+                    <circle cx="50" cy="50" r="45" fill="none"
+                            stroke="var(--accent)" stroke-width="8"
+                            stroke-dasharray="${circumference}"
+                            stroke-dashoffset="${offset}"
+                            transform="rotate(-90 50 50)"/>
+                </svg>
+                <span class="coverage-number">${percent}%</span>
+            </div>
+            <div class="coverage-stats">
+                <span>已掌握 ${coverage.mastered_points}/${coverage.total_points} 个知识点</span>
+            </div>
+        </div>
+
+        <div class="chapter-stats">
+            <h3>章节掌握情况</h3>
+            ${(overview.chapter_stats || []).map(ch => {
+                const chPercent = ch.total > 0 ? Math.round(ch.mastered / ch.total * 100) : 0;
+                return `
+                    <div class="chapter-stat-item">
+                        <span class="chapter-name">${escapeHtml(ch.title || `第${ch.idx + 1}章`)}</span>
+                        <div class="progress-bar-mini">
+                            <div class="progress-bar-mini-fill" style="width:${chPercent}%"></div>
+                        </div>
+                        <span class="chapter-count">${ch.mastered}/${ch.total}</span>
+                    </div>
+                `;
+            }).join('')}
+        </div>
+
+        ${overview.weak_areas && overview.weak_areas.length > 0 ? `
+            <div class="weak-areas">
+                <h3>⚠️ 薄弱环节</h3>
+                ${overview.weak_areas.map(w => `
+                    <div class="weak-item">
+                        <span class="weak-desc">${escapeHtml(w.description)}</span>
+                        <span class="weak-chapter">第${w.chapter_index + 1}章</span>
+                    </div>
+                `).join('')}
+            </div>
+        ` : ''}
+
+        <div class="recommendation">
+            <h3>💡 下一步行动建议</h3>
+            <p>${escapeHtml(overview.recommendation || '')}</p>
+        </div>
+    `;
+
+    container.innerHTML = html;
+}
+
+// ==================== 模式-契约联动默认值 ====================
+function onReadingModeSelected(mode) {
+    const defaults = {
+        speed: { depth: 'basic', duration: 15 },
+        standard: { depth: 'standard', duration: 30 },
+        deep: { depth: 'deep', duration: 60 },
+    };
+
+    const modeDefaults = defaults[mode] || defaults.standard;
+
+    // 自动选中对应的深度按钮
+    document.querySelectorAll('.depth-btn').forEach(btn => {
+        btn.classList.toggle('selected', btn.dataset.depth === modeDefaults.depth);
+    });
+
+    // 自动选中对应的时长按钮
+    document.querySelectorAll('.duration-btn').forEach(btn => {
+        btn.classList.toggle('selected', parseInt(btn.dataset.duration) === modeDefaults.duration);
+    });
+
+    // 更新阅读模式选择
+    AppState.selectedReadingMode = mode;
+    document.querySelectorAll('.mode-btn').forEach(btn => {
+        btn.classList.toggle('selected', btn.dataset.mode === mode);
+    });
+
+    // 显示预期产出
+    const expectedOutputs = {
+        speed: '知识快照 + 核心观点列表',
+        standard: '知识点掌握报告 + 复习总结',
+        deep: '思辨笔记 + 读书笔记',
+    };
+    showToast(`预期产出：${expectedOutputs[mode]}`, 'info');
+}
+
+// ==================== 辩证分析标注 ====================
+function renderDialecticalContent(content, state) {
+    // 检测是否包含辩证分析标记
+    const dialecticalMarkers = {
+        'cross_chapter': '🔄 跨章对比',
+        'hidden_assumption': '🔍 隐含前提',
+        'counter_argument': '⚔️ 反方观点',
+        'application_test': '🧪 应用场景检验',
+    };
+
+    // 在消息气泡旁显示分析类型标签
+    for (const [key, label] of Object.entries(dialecticalMarkers)) {
+        if (content.includes(key)) {
+            return `<span class="dialectical-tag">${label}</span>` + content;
+        }
+    }
+    return content;
+}
+
+// ==================== 加载课程详情（兼容函数） ====================
+async function loadCourseDetail(courseId) {
+    await openCourse(courseId);
+}
 
 

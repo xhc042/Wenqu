@@ -11,7 +11,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).parent.resolve()
 
 # 应用版本
-VERSION = "1.1.2"
+VERSION = "1.20"
 
 # 资源目录（static/prompts）：PyInstaller onefile 模式下解压到 sys._MEIPASS
 if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
@@ -78,37 +78,61 @@ DEPTH_CONFIG = {
         "probe_complexity": "强制对比前序章节，允许指出教材逻辑瑕疵",
         "explain_detail": "引用前序章节矛盾点",
         "description": "深入探究",
+        "critical_angles": [
+            "作者假设是否合理？",
+            "不同章节之间是否存在矛盾？",
+            "这个理论的反面观点是什么？",
+            "在实际应用中可能遇到什么局限？",
+        ],
+    },
+    "dialectical": {
+        "share_max_length": 0,
+        "probe_complexity": "必须对比至少2个章节的观点，指出潜在矛盾或统一关系",
+        "explain_detail": "引用教材原文+外部学术观点进行对比分析",
+        "description": "辩证分析",
+        "critical_angles": [
+            "作者假设是否合理？",
+            "不同章节之间是否存在矛盾？",
+            "这个理论的反面观点是什么？",
+            "在实际应用中可能遇到什么局限？",
+        ],
     },
 }
 
 # ==================== 阅读模式配置 ====================
 READING_MODE_CONFIG = {
     "speed": {
-        "label": "速读",
+        "label": "速读·精华",
         "emoji": "🚀",
-        "extract_depth": "toc_only",          # 仅提取目录结构
-        "content_sample": "first_last",        # 每章只取首尾段
-        "llm_tier": "fast",                    # 使用轻量级模型
-        "generate_syllabus": False,            # 不生成掌握项
-        "description": "快速建立知识地图，决定是否深入",
+        "extract_depth": "full_toc_first",
+        "content_sample": "llm_summary",
+        "llm_tier": "balanced",
+        "generate_syllabus": True,
+        "syllabus_strategy": "key_points_only",
+        "max_chapters_dialogue": 5,
+        "description": "快速掌握全书最重要知识点",
     },
     "standard": {
         "label": "细读",
         "emoji": "📖",
-        "extract_depth": "full",               # 提取全文
-        "content_sample": "full_5000",         # 截取前5000字符
-        "llm_tier": "balanced",                # 使用标准模型
-        "generate_syllabus": True,             # 生成标准掌握项
+        "extract_depth": "full",
+        "content_sample": "full_5000",
+        "llm_tier": "balanced",
+        "generate_syllabus": True,
         "description": "系统学习，逐章推进",
     },
     "deep": {
-        "label": "研读",
+        "label": "研读·辩证",
         "emoji": "🔬",
-        "extract_depth": "full_lazy",          # 全文但懒加载
-        "content_sample": "full",              # 不截断
-        "llm_tier": "flagship",                # 使用最强模型
-        "generate_syllabus": True,             # 生成深度掌握项
-        "generate_socratic_questions": True,   # 额外生成认知冲突问题
+        "extract_depth": "full_lazy",
+        "content_sample": "full",
+        "llm_tier": "flagship",
+        "generate_syllabus": True,
+        "generate_socratic_questions": True,
+        "dialectical_analysis": True,
+        "cross_chapter_comparison": True,
+        "critical_thinking_prompts": True,
+        "max_depth_rounds": 20,
         "description": "学术研究，专业精进，苏格拉底式追问",
     },
 }
@@ -124,7 +148,61 @@ FLOW_DETECTION = {
 }
 
 # 学习时长选项（分钟）
-DURATION_OPTIONS = [15, 30, 60]
+DURATION_OPTIONS = [15, 30, 60, 120]
+
+# ==================== 模式-契约联动默认值 ====================
+MODE_CONTRACT_DEFAULTS = {
+    "speed": {
+        "depth": "basic",
+        "duration": 15,
+        "goal": "完成知识地图，掌握全书最重要的5-10个核心概念",
+        "expected_output": "知识快照 + 核心观点列表",
+    },
+    "standard": {
+        "depth": "standard",
+        "duration": 30,
+        "goal": "逐章学习，覆盖全部掌握项",
+        "expected_output": "知识点掌握报告 + 复习总结",
+    },
+    "deep": {
+        "depth": "deep",
+        "duration": 60,
+        "goal": "深度理解+批判性思考，形成个人辩证分析",
+        "expected_output": "思辨笔记 + 读书笔记",
+    },
+}
+
+# ==================== 时长配置 ====================
+DURATION_CONFIG = {
+    15: {
+        "label": "快速浏览",
+        "target": "complete_1_chapter_or_2_key_points",
+        "min_rounds": 3,
+        "max_chapters": 1,
+        "strategy": "focus_on_high_yield",
+    },
+    30: {
+        "label": "标准学习",
+        "target": "complete_1_chapter_thoroughly",
+        "min_rounds": 6,
+        "max_chapters": 1,
+        "strategy": "balanced",
+    },
+    60: {
+        "label": "深度学习",
+        "target": "complete_2_chapters_or_master_all",
+        "min_rounds": 12,
+        "max_chapters": 2,
+        "strategy": "comprehensive",
+    },
+    120: {
+        "label": "沉浸式学习",
+        "target": "complete_remaining_or_master_weak_areas",
+        "min_rounds": 24,
+        "max_chapters": 999,
+        "strategy": "mastery_based",
+    },
+}
 
 # 角色推荐规则（关键词匹配）
 ROLE_RECOMMENDATION = {

@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 import httpx
 import aiofiles
 
-from llm_client import llm
+from llm_client import llm, multi_llm
 
 # ==================== EPUB TOC 提取 ====================
 
@@ -539,11 +539,14 @@ async def smart_chunk_from_epub(file_path: str, reading_mode: str = "standard") 
             if len(combined_title_parts) > 1:
                 short_titles = [t for t in combined_title_parts if len(t) <= 20 and not t.startswith('ETF')]
                 if short_titles:
-                    title = " | ".join(short_titles)
+                    raw_title = " | ".join(short_titles)
                 else:
-                    title = combined_title_parts[0]
+                    raw_title = combined_title_parts[0]
             else:
-                title = combined_title_parts[0]
+                raw_title = combined_title_parts[0]
+
+            # 清理标题，提升可读性
+            title = _clean_chapter_title(raw_title, combined_text)
 
             meta = combined_meta
             if reading_mode == "speed":
@@ -552,7 +555,9 @@ async def smart_chunk_from_epub(file_path: str, reading_mode: str = "standard") 
             elif reading_mode == "deep":
                 chapters.append((title, combined_text, meta))
             else:
-                chapters.append((title, combined_text[:5000], meta))
+                # 细读模式：使用均匀采样，保证全书代表性
+                sampled_content = sample_chapter_fairly(combined_text, 5000)
+                chapters.append((title, sampled_content, meta))
 
         combined_text = ""
         combined_meta = None
@@ -586,6 +591,47 @@ async def smart_chunk_from_epub(file_path: str, reading_mode: str = "standard") 
     flush_combined()
 
     return chapters
+
+
+def _clean_chapter_title(title: str, content: str = "") -> str:
+    """
+    清理章节标题，提升可读性
+    1. 去除无意义的前缀（如数字编号）
+    2. 如果标题太短或无意义，从正文中提取
+    """
+    if not title:
+        return "未命名章节"
+
+    # 清理HTML实体
+    title = title.replace('&nbsp;', ' ').replace('&amp;', '&')
+
+    # 检查标题是否太短或只有数字（无意义）
+    import re
+    # 匹配纯数字、纯字母、或只有章节编号的标题
+    is_meaningless = (
+        len(title.strip()) < 2 or  # 太短
+        re.match(r'^[\d\s\.\-]+$', title.strip()) or  # 只有数字和符号
+        re.match(r'^第\s*\d+\s*章?\s*$', title.strip()) or  # 只有"第X章"
+        re.match(r'^(chapter|ch|section|sec)\s*\d+$', title.strip(), re.IGNORECASE)  # 只有英文章节号
+    )
+
+    if is_meaningless and content:
+        # 尝试从正文中提取第一句有意义的句子作为标题
+        paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
+        for para in paragraphs[:3]:  # 最多尝试前3段
+            # 取第一句（不超过30字）
+            sentences = re.split(r'[。.!？]', para)
+            for s in sentences:
+                s = s.strip()
+                if len(s) >= 4 and len(s) <= 30:
+                    # 去除可能的引号
+                    s = re.sub(r'^["""\'"]+|["""\'"]+$', '', s)
+                    return s
+        return f"第{title.strip()}节" if title.strip() else "未命名章节"
+
+    # 清理多余的空白
+    title = re.sub(r'\s+', ' ', title.strip())
+    return title if len(title) <= 50 else title[:47] + '...'
 
 
 def _sample_first_last(text: str, max_per_sample: int = 300) -> str:
@@ -755,6 +801,373 @@ async def smart_chunk(text: str, source_type: str = "", file_path: str = "", rea
     return _level3_force_chunk(text)
 
 
+# ==================== 速读模式：知识快照提取 ====================
+
+import re as _re
+
+# 元数据章节模式：序言、前言、自序、目录、附录等不应该作为核心章节
+NON_CORE_TITLE_PATTERNS = [
+    _re.compile(r'^(推荐序|序言|前言|自序|后记|跋|致谢|目录|引言|引子|楔子|写在前面|编者按|内容简介|作者简介|书籍简介|图书简介|出版说明)'),
+    _re.compile(r'^(附录|附录[一二三四五六七八九十]|附\s*[一二三四五六七八九十])'),
+    _re.compile(r'^(参考文献|参考资料|推荐阅读|延伸阅读|书目|索引)'),
+    _re.compile(r'^(序)$|^(序[一二三四五六七八九十])$'),
+]
+
+
+def is_non_core_chapter(title: str) -> bool:
+    """
+    判断章节是否为元数据章节（序言/前言/自序/附录等）
+    这些章节不应作为核心章节推荐
+    """
+    if not title:
+        return True
+    title = title.strip()
+    for pat in NON_CORE_TITLE_PATTERNS:
+        if pat.match(title):
+            return True
+    return False
+
+
+async def extract_chapter_snapshot(text: str, title: str) -> dict:
+    """
+    用LLM提取每章知识快照
+    返回扩展结构（含学习目标、重要性、前置依赖等）
+
+    注意：使用 llm 单例（与对话学习一致），而不是 multi_llm.balanced
+    这样快照生成能直接复用用户配置的主模型，不需要额外配置 balanced 层级
+    """
+    if not text or not text.strip():
+        return {
+            "keywords": [], "core_viewpoint": "",
+            "learning_goal": "", "importance": 0, "difficulty": "未知"
+        }
+
+    is_meta = is_non_core_chapter(title)
+
+    if is_meta:
+        # 元数据章节：用更短的 prompt 并强制 importance 较低
+        prompt = f"""你是读书导师。这是书的元数据章节（序言/前言/自序/推荐序/附录等），它的作用是介绍背景。
+
+章节：{title}
+内容：{text[:1000]}
+
+请生成：
+1. **keywords** - 1-3个最相关的词（不要超过3个）
+2. **core_viewpoint** - 1句话概括本章主题（不超过25字）
+3. **learning_goal** - 用"能..."描述（必须是可以观察的具体动作，比如"能说出XXX的3个核心观点"或"能列出XXX的5个要点"）
+4. **importance** - 重要性：1-2（这种章节通常1，不是核心内容）
+5. **difficulty** - 难度：简单/中等/较难
+
+返回严格JSON：
+{{"keywords": ["词1"], "core_viewpoint": "...", "learning_goal": "能...", "importance": 1, "difficulty": "简单"}}"""
+    else:
+        prompt = f"""你是读书导师，为读者提炼本章的学习价值。
+
+章节：{title}
+内容：{text[:2000]}
+
+请生成：
+1. **keywords** - 3-5个关键词（中文术语，书籍核心概念）
+2. **core_viewpoint** - 一句话核心观点（不超过30字）
+3. **learning_goal** - 学习目标：用"能+具体动词"描述可观察的具体能力（不超过25字）
+   - ✅ 好例子："能列出ETF的5种投资策略"、"能解释ETF的运作机制"、"能区分主动型与被动型ETF"
+   - ❌ 坏例子："能理解ETF"、"能掌握ETF知识"、"能了解XXX"
+4. **importance** - 重要性：1-5的整数（5=全书最核心，正文最关键章节）
+5. **difficulty** - 难度：简单/中等/较难
+
+返回严格JSON（不要任何其他内容）：
+{{"keywords": ["关键词1", "关键词2"], "core_viewpoint": "一句话观点", "learning_goal": "能+具体动作", "importance": 3, "difficulty": "中等"}}"""
+
+    # 重试机制：最多3次（使用 llm 单例，与对话学习保持一致）
+    last_error = None
+    for attempt in range(3):
+        try:
+            result = await llm.chat_json([
+                {"role": "system", "content": "你是知识提炼专家。严格返回JSON，不要任何其他文字。"},
+                {"role": "user", "content": prompt},
+            ], temperature=0.3)
+
+            # 字段解析与验证
+            keywords = result.get("keywords", [])
+            if not isinstance(keywords, list):
+                keywords = []
+            keywords = [str(k) for k in keywords[:5] if k]  # 过滤空值
+
+            core_viewpoint = str(result.get("core_viewpoint", ""))[:100]
+            learning_goal = str(result.get("learning_goal", ""))[:80]
+
+            importance = result.get("importance", 3)
+            if not isinstance(importance, (int, float)):
+                importance = 3
+            importance = max(1, min(5, int(importance)))
+
+            # 元数据章节（序言/前言/自序等）强制 importance <= 2
+            if is_meta:
+                importance = min(importance, 2)
+
+            difficulty = str(result.get("difficulty", "中等"))
+            if difficulty not in ("简单", "中等", "较难"):
+                difficulty = "中等"
+
+            # 修正 learning_goal：检测抽象词
+            abstract_words = ['理解', '掌握', '了解', '知道', '熟悉']
+            if any(w in learning_goal for w in abstract_words) and not is_meta:
+                # 抽象词开头，加具体动作提示
+                pass  # 不强行修改，让 prompt 引导
+
+            # 必须有内容才算成功
+            if keywords or core_viewpoint:
+                return {
+                    "keywords": keywords,
+                    "core_viewpoint": core_viewpoint,
+                    "learning_goal": learning_goal,
+                    "importance": importance,
+                    "difficulty": difficulty,
+                }
+            else:
+                last_error = "LLM返回了空数据"
+        except Exception as e:
+            last_error = f"LLM调用失败: {e}"
+            import logging
+            logging.warning(f"快照生成第{attempt+1}次尝试失败 [{title[:20]}]: {e}")
+
+    # 全部失败：使用文本回退（确保有内容而不是空）
+    import logging
+    logging.error(f"快照生成最终失败 [{title[:20]}]: {last_error}")
+
+    # 从文本中提取前几个词作为关键词（兜底）
+    fallback_keywords = _extract_keywords_fallback(text, title)
+    return {
+        "keywords": fallback_keywords,
+        "core_viewpoint": f"本章讲解「{title}」相关内容",
+        "learning_goal": f"了解「{title}」的基本内容",
+        "importance": 3,
+        "difficulty": "中等",
+        "_fallback": True,  # 标记为兜底数据
+    }
+
+
+def _extract_keywords_fallback(text: str, title: str, max_count: int = 5) -> list:
+    """
+    兜底关键词提取：不调用LLM，用基础NLP方法
+    """
+    if not text:
+        return [title] if title else []
+
+    import re
+    # 简单提取：标题+首段中的实词
+    first_para = text[:200]
+    # 提取2-4字的中文实词
+    words = re.findall(r'[\u4e00-\u9fa5]{2,4}', first_para)
+    # 去重保持顺序
+    seen = set()
+    result = []
+    for w in words:
+        if w not in seen and len(w) >= 2:
+            seen.add(w)
+            result.append(w)
+        if len(result) >= max_count - 1:
+            break
+    if title and title not in seen:
+        result.insert(0, title)
+    return result[:max_count]
+
+
+async def generate_global_highlights(course_id: str, snapshots: list, chapter_titles: list) -> dict:
+    """
+    从所有章节快照中提炼全书核心知识点
+    包含：核心知识点、章节依赖关系、推荐学习顺序
+    """
+    if not snapshots or not chapter_titles:
+        return {
+            "key_points": [], "chapter_priorities": [], "relationships": "",
+            "chapter_dependencies": {}, "core_chapter_indices": []
+        }
+
+    # 构建章节摘要信息（含重要性）
+    snapshot_text = "\n".join(
+        f"第{i+1}章「{chapter_titles[i]}」 [重要性={s.get('importance', 3)}]: "
+        f"关键词={s.get('keywords', [])}, 观点={s.get('core_viewpoint', '')}"
+        for i, s in enumerate(snapshots)
+    )
+
+    # 标记元数据章节（序言/前言/自序等）
+    meta_indices = [i for i, t in enumerate(chapter_titles) if is_non_core_chapter(t)]
+    if meta_indices:
+        meta_warning = (
+            f"\n\n⚠️ 重要提示：以下章节是元数据章节（序言/前言/自序/推荐序/附录/目录等），"
+            f"**绝对不能**作为核心章节或推荐学习章节：第{', '.join(str(i+1) for i in meta_indices)}章\n"
+            f"核心章节必须来自正文章节（带'第N章'或'第N部分'等），不应包含序言类内容。\n"
+        )
+    else:
+        meta_warning = ""
+
+    prompt = f"""基于以下全书章节快照，请完成5个任务：
+
+{snapshot_text}
+{meta_warning}
+任务1：提炼5-10个最重要的跨章核心知识点（**用"能+具体动作"描述，每个不超过20字**）
+   - ✅ 好例子："能列出ETF的5种投资策略"、"能解释ETF运作机制"、"能区分主动型与被动型ETF"
+   - ❌ 坏例子："能理解ETF"、"能掌握ETF知识"、"能了解XXX"
+任务2：推荐优先学习的章节顺序（**只能推荐正文章节，不能是序言/前言/自序/附录**）
+任务3：标注章节间的关键依赖关系（哪些正文章节必须先学）
+任务4：识别全书最核心的4-6个正文章节（占全书价值80%），**绝对不能包含序言/前言/自序/附录等元数据章节**
+任务5：用50字以内描述全书的核心逻辑关系
+
+返回严格JSON（不要任何其他文字）：
+{{
+  "key_points": ["能+具体动作", "能+具体动作", ...],
+  "chapter_priorities": ["第5章", "第8章", ...],
+  "chapter_dependencies": {{"第8章": "第5章"}},
+  "core_chapter_indices": ["第5章", "第8章", "第11章", "第14章"],
+  "relationships": "全书核心逻辑关系描述"
+}}"""
+
+    last_error = None
+    for attempt in range(3):
+        try:
+            result = await llm.chat_json([
+                {"role": "system", "content": "你是知识地图构建专家。严格返回JSON，不要其他内容。"},
+                {"role": "user", "content": prompt},
+            ], temperature=0.3)
+
+            key_points = result.get("key_points", [])
+            chapter_priorities = result.get("chapter_priorities", [])
+            chapter_dependencies = result.get("chapter_dependencies", {})
+            core_chapter_indices = result.get("core_chapter_indices", [])
+            relationships = str(result.get("relationships", ""))
+
+            # 过滤掉元数据章节（序言/前言/自序/附录等）
+            # 注意：core_chapter_indices 是形如"第N章"的字符串
+            import re
+            def _parse_chapter_num(s: str) -> int:
+                m = re.search(r'第(\d+)章', str(s))
+                return int(m.group(1)) - 1 if m else -1
+
+            core_chapter_indices = [
+                s for s in (core_chapter_indices or [])
+                if isinstance(s, str)
+                and 0 <= _parse_chapter_num(s) < len(chapter_titles)
+                and not is_non_core_chapter(chapter_titles[_parse_chapter_num(s)])
+            ]
+            chapter_priorities = [
+                s for s in (chapter_priorities or [])
+                if isinstance(s, str)
+                and 0 <= _parse_chapter_num(s) < len(chapter_titles)
+            ]
+
+            # 验证：至少有内容
+            if key_points or chapter_priorities:
+                # 兜底：如果 LLM 没返回核心章节，基于重要性计算
+                if not core_chapter_indices:
+                    core_chapter_indices = _infer_core_chapters(snapshots, chapter_titles)
+
+                return {
+                    "key_points": key_points if isinstance(key_points, list) else [],
+                    "chapter_priorities": chapter_priorities if isinstance(chapter_priorities, list) else [],
+                    "chapter_dependencies": chapter_dependencies if isinstance(chapter_dependencies, dict) else {},
+                    "core_chapter_indices": core_chapter_indices if isinstance(core_chapter_indices, list) else [],
+                    "relationships": relationships[:200],
+                }
+            else:
+                last_error = "LLM返回空数据"
+        except Exception as e:
+            last_error = f"LLM调用失败: {e}"
+            import logging
+            logging.warning(f"全局精华生成第{attempt+1}次失败: {e}")
+
+    # 全部失败：基于快照重要性自动计算（兜底）
+    import logging
+    logging.error(f"全局精华生成最终失败: {last_error}")
+    return _build_highlights_fallback(snapshots, chapter_titles)
+
+
+def _infer_core_chapters(snapshots: list, chapter_titles: list = None, top_n: int = 5) -> list:
+    """
+    兜底：基于快照的 importance 字段识别核心章节
+    排除元数据章节（序言/前言/自序等）
+    """
+    if chapter_titles is None:
+        chapter_titles = [""] * len(snapshots)
+
+    # 过滤掉元数据章节
+    valid_indices = [
+        i for i, title in enumerate(chapter_titles)
+        if not is_non_core_chapter(title)
+    ]
+
+    if not valid_indices:
+        # 没有正文章节时回退到所有章节
+        valid_indices = list(range(len(snapshots)))
+
+    # 按重要性排序
+    sorted_indices = sorted(
+        valid_indices,
+        key=lambda i: snapshots[i].get("importance", 3),
+        reverse=True
+    )
+
+    return [f"第{i+1}章" for i in sorted_indices[:top_n]]
+
+
+def _build_highlights_fallback(snapshots: list, chapter_titles: list) -> dict:
+    """
+    兜底：LLM完全失败时，基于快照数据手动构建精华
+    """
+    # 收集所有非空关键词（排除元数据章节）
+    all_keywords = []
+    for i, s in enumerate(snapshots):
+        if i < len(chapter_titles) and is_non_core_chapter(chapter_titles[i]):
+            continue
+        for kw in s.get("keywords", []):
+            if kw and kw not in all_keywords:
+                all_keywords.append(kw)
+
+    # 基于 importance 排序找核心章节（自动过滤元数据）
+    core_indices = _infer_core_chapters(snapshots, chapter_titles, top_n=5)
+    all_priorities = [f"第{i+1}章" for i in range(len(snapshots))]
+
+    return {
+        "key_points": [f"能描述{kw}的核心要点" for kw in all_keywords[:8]] if all_keywords else [],
+        "chapter_priorities": all_priorities,
+        "chapter_dependencies": {},
+        "core_chapter_indices": core_indices,
+        "relationships": "由于系统暂时无法深度分析，请按章节顺序学习",
+        "_fallback": True,
+    }
+
+
+# ==================== 细读模式：均匀采样 ====================
+
+def sample_chapter_fairly(text: str, target_chars: int = 5000) -> str:
+    """
+    按章节均匀采样，保证全书代表性
+    不是只取前5000字，而是每段取固定比例
+    """
+    paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+    if not paragraphs:
+        return text[:target_chars]
+
+    total_chars = sum(len(p) for p in paragraphs)
+    if total_chars <= target_chars:
+        return '\n\n'.join(paragraphs)
+
+    # 按比例分配每段的采样字符数
+    ratio = target_chars / total_chars
+    sampled = []
+    current_chars = 0
+
+    for para in paragraphs:
+        if current_chars >= target_chars:
+            break
+        # 按比例采样该段落
+        sampled_chars = min(len(para), int(len(para) * ratio) + 500)
+        sampled.append(para[:sampled_chars])
+        current_chars += sampled_chars
+
+    return '\n\n'.join(sampled)
+
+
 # ==================== 掌握项生成（支持分级） ====================
 
 async def generate_syllabus_items(course_id: str, chapters: list) -> list:
@@ -800,6 +1213,86 @@ async def generate_syllabus_items(course_id: str, chapters: list) -> list:
                 all_items.append((idx, d))
 
     return all_items
+
+
+async def generate_speed_read_syllabus(course_id: str, chapters: list, snapshots: list) -> list:
+    """
+    速读模式：只生成全书最重要的20%知识点（精华掌握项）
+    基于知识快照和全局精华，精选最核心的掌握项
+    返回 [(chapter_index, description), ...]
+    """
+    if not chapters or not snapshots:
+        return []
+
+    # 构建章节索引到快照的映射
+    snapshot_map = {s.get("chapter_index", i): s for i, s in enumerate(snapshots)}
+
+    # 收集所有章节的核心信息
+    chapter_info = []
+    for i, item in enumerate(chapters):
+        if isinstance(item, tuple) and len(item) >= 2:
+            ch_title, ch_content = item[0], item[1]
+        else:
+            continue
+
+        snapshot = snapshot_map.get(i, {})
+        keywords = snapshot.get("keywords", [])
+        core_viewpoint = snapshot.get("core_viewpoint", "")
+
+        chapter_info.append({
+            "chapter_index": i,
+            "title": ch_title,
+            "keywords": keywords,
+            "core_viewpoint": core_viewpoint,
+            "content_preview": ch_content[:500] if ch_content else "",
+        })
+
+    # 估算全书总知识点数量，目标是只提取20%
+    # 假设每章平均3个知识点，全书约 len(chapters) * 3 个
+    total_estimated = len(chapters) * 3
+    target_count = max(5, min(15, int(total_estimated * 0.2)))  # 5-15个之间
+
+    # 构建 prompt，让 LLM 精选最重要的知识点
+    chapter_summary = "\n".join([
+        f"第{c['chapter_index'] + 1}章「{c['title']}」：关键词={c['keywords']}，核心观点={c['core_viewpoint']}"
+        for c in chapter_info[:20]  # 最多处理20章
+    ])
+
+    prompt = f"""你是课程设计专家。请从以下全书章节中，精选最重要的{target_count}个知识点，生成精华掌握项清单。
+
+要求：
+1. 每条掌握项以"能..."开头
+2. 只选择全书最核心的概念和原理（最重要的20%）
+3. 优先选择跨章节关联的知识点
+4. 避免重复，选择真正有区分度的知识点
+
+全书章节概览：
+{chapter_summary}
+
+返回JSON格式：
+{{"items": [
+    {{"chapter_index": 0, "description": "能用自己的话解释XXX概念"}},
+    ...
+]}}"""
+
+    try:
+        result = await llm.chat_json([
+            {"role": "system", "content": "你是课程设计专家，擅长提炼核心知识点。只返回JSON。"},
+            {"role": "user", "content": prompt},
+        ])
+
+        items = result.get("items", [])
+        all_items = []
+        for item in items:
+            ch_idx = item.get("chapter_index", 0)
+            desc = item.get("description", "")
+            if desc:
+                all_items.append((ch_idx, desc))
+
+        return all_items
+    except Exception as e:
+        print(f"速读模式掌握项生成失败: {e}")
+        return []
 
 
 async def generate_course_summary(text: str) -> str:

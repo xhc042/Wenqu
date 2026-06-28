@@ -232,6 +232,46 @@ def init_db():
             FOREIGN KEY (provider_id) REFERENCES llm_providers(id) ON DELETE CASCADE,
             UNIQUE(provider_id, name)
         );
+
+        -- 章节快照表（速读模式用）
+        CREATE TABLE IF NOT EXISTS chapter_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            course_id TEXT NOT NULL,
+            chapter_index INTEGER NOT NULL,
+            keywords TEXT,
+            core_viewpoint TEXT,
+            global_priority INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (course_id) REFERENCES courses(id),
+            UNIQUE(course_id, chapter_index)
+        );
+
+        -- 全局精华表（速读模式用）
+        CREATE TABLE IF NOT EXISTS global_highlights (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            course_id TEXT NOT NULL UNIQUE,
+            key_points TEXT,
+            chapter_priorities TEXT,
+            relationships TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (course_id) REFERENCES courses(id)
+        );
+
+        -- 思辨笔记表（研读模式用）
+        CREATE TABLE IF NOT EXISTS spiritual_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            course_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            chapter_index INTEGER,
+            core_contradictions TEXT,
+            unresolved_questions TEXT,
+            extension_directions TEXT,
+            personal_reflection TEXT,
+            raw_content TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (course_id) REFERENCES courses(id),
+            FOREIGN KEY (session_id) REFERENCES sessions(id)
+        );
         """)
         conn.commit()
     finally:
@@ -249,6 +289,8 @@ def _migrate_schema():
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(courses)")}
         if "reading_mode" not in cols:
             conn.execute("ALTER TABLE courses ADD COLUMN reading_mode TEXT DEFAULT 'standard'")
+        if "mastery_progress" not in cols:
+            conn.execute("ALTER TABLE courses ADD COLUMN mastery_progress TEXT DEFAULT '{}'")
 
         # 检查 chapters 表
         cols2 = {row["name"] for row in conn.execute("PRAGMA table_info(chapters)")}
@@ -261,6 +303,25 @@ def _migrate_schema():
         ]:
             if col not in cols2:
                 conn.execute(f"ALTER TABLE chapters ADD COLUMN {col} {col_def}")
+
+        # 检查 chapter_snapshots 表（速读模式增强字段）
+        cols3 = {row["name"] for row in conn.execute("PRAGMA table_info(chapter_snapshots)")}
+        for col, col_def in [
+            ("learning_goal", "TEXT DEFAULT ''"),
+            ("importance", "INTEGER DEFAULT 0"),
+            ("difficulty", "TEXT DEFAULT ''"),
+        ]:
+            if col not in cols3:
+                conn.execute(f"ALTER TABLE chapter_snapshots ADD COLUMN {col} {col_def}")
+
+        # 检查 global_highlights 表（核心章节+依赖关系）
+        cols4 = {row["name"] for row in conn.execute("PRAGMA table_info(global_highlights)")}
+        for col, col_def in [
+            ("core_chapter_indices", "TEXT DEFAULT '[]'"),
+            ("chapter_dependencies", "TEXT DEFAULT '{}'"),
+        ]:
+            if col not in cols4:
+                conn.execute(f"ALTER TABLE global_highlights ADD COLUMN {col} {col_def}")
 
         conn.commit()
     finally:
@@ -317,20 +378,39 @@ def get_all_courses() -> list:
 def delete_course(course_id: str) -> bool:
     conn = get_conn()
     try:
-        # 先删子表（有外键约束），最后删主表
+        # 1. 先删 spiritual_notes（引用 sessions）
+        conn.execute("DELETE FROM spiritual_notes WHERE course_id=?", (course_id,))
+        # 2. 删 messages（引用 sessions）
         conn.execute("DELETE FROM messages WHERE session_id IN (SELECT id FROM sessions WHERE course_id=?)", (course_id,))
+        # 3. 删 group_chats（引用 sessions）
         conn.execute("DELETE FROM group_chats WHERE session_id IN (SELECT id FROM sessions WHERE course_id=?)", (course_id,))
+        # 4. 删 diaries（引用 sessions）
         conn.execute("DELETE FROM diaries WHERE session_id IN (SELECT id FROM sessions WHERE course_id=?)", (course_id,))
+        # 5. 删 summaries（引用 sessions）
         conn.execute("DELETE FROM summaries WHERE session_id IN (SELECT id FROM sessions WHERE course_id=?)", (course_id,))
-        conn.execute("DELETE FROM annotations WHERE course_id=?", (course_id,))
+        # 6. 删 sessions（可删除了）
         conn.execute("DELETE FROM sessions WHERE course_id=?", (course_id,))
+        # 7. 删 annotations（直接引用 courses）
+        conn.execute("DELETE FROM annotations WHERE course_id=?", (course_id,))
+        # 8. 删 chapter_snapshots（引用 courses）
+        conn.execute("DELETE FROM chapter_snapshots WHERE course_id=?", (course_id,))
+        # 9. 删 global_highlights（引用 courses）
+        conn.execute("DELETE FROM global_highlights WHERE course_id=?", (course_id,))
+        # 10. 删 chapters（引用 courses）
         conn.execute("DELETE FROM chapters WHERE course_id=?", (course_id,))
+        # 11. 删 syllabus_items（引用 courses）
         conn.execute("DELETE FROM syllabus_items WHERE course_id=?", (course_id,))
+        # 12. 删 teacher_affinity（引用 courses）
         conn.execute("DELETE FROM teacher_affinity WHERE course_id=?", (course_id,))
+        # 13. 删 course_profiles（引用 courses）
         conn.execute("DELETE FROM course_profiles WHERE course_id=?", (course_id,))
+        # 14. 删 role_sliders（引用 courses）
         conn.execute("DELETE FROM role_sliders WHERE course_id=?", (course_id,))
+        # 15. 删 learning_events
         conn.execute("DELETE FROM learning_events WHERE course_id=?", (course_id,))
+        # 16. 删 certificates（引用 courses）
         conn.execute("DELETE FROM certificates WHERE course_id=?", (course_id,))
+        # 17. 最后删 courses
         conn.execute("DELETE FROM courses WHERE id=?", (course_id,))
         conn.commit()
         return True
@@ -1161,5 +1241,201 @@ def get_active_model_with_provider() -> dict:
             WHERE p.is_active = 1
         """).fetchone()
         return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+# ==================== 章节快照（速读模式） ====================
+
+def add_chapter_snapshot(course_id: str, chapter_index: int, keywords: str, core_viewpoint: str,
+                         global_priority: int = 0, learning_goal: str = "",
+                         importance: int = 0, difficulty: str = "") -> int:
+    """添加或更新章节快照（支持扩展字段）"""
+    conn = get_conn()
+    try:
+        cur = conn.execute("""
+            INSERT INTO chapter_snapshots
+                (course_id, chapter_index, keywords, core_viewpoint, global_priority, learning_goal, importance, difficulty)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(course_id, chapter_index) DO UPDATE SET
+                keywords=excluded.keywords,
+                core_viewpoint=excluded.core_viewpoint,
+                global_priority=excluded.global_priority,
+                learning_goal=excluded.learning_goal,
+                importance=excluded.importance,
+                difficulty=excluded.difficulty
+        """, (course_id, chapter_index, keywords, core_viewpoint, global_priority,
+              learning_goal, importance, difficulty))
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_chapter_snapshots(course_id: str) -> list:
+    """获取课程所有章节快照"""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM chapter_snapshots WHERE course_id=? ORDER BY chapter_index",
+            (course_id,)
+        ).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["keywords"] = json.loads(d.get("keywords", "[]"))
+            result.append(d)
+        return result
+    finally:
+        conn.close()
+
+
+def get_chapter_snapshot(course_id: str, chapter_index: int) -> Optional[dict]:
+    """获取单个章节快照"""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM chapter_snapshots WHERE course_id=? AND chapter_index=?",
+            (course_id, chapter_index)
+        ).fetchone()
+        if row:
+            d = dict(row)
+            d["keywords"] = json.loads(d.get("keywords", "[]"))
+            return d
+        return None
+    finally:
+        conn.close()
+
+
+# ==================== 全局精华（速读模式） ====================
+
+def add_global_highlights(course_id: str, key_points: str, chapter_priorities: str, relationships: str = "",
+                          core_chapter_indices: str = "[]", chapter_dependencies: str = "{}") -> int:
+    """添加或更新全局精华（含核心章节和依赖关系）"""
+    conn = get_conn()
+    try:
+        cur = conn.execute("""
+            INSERT INTO global_highlights
+                (course_id, key_points, chapter_priorities, relationships, core_chapter_indices, chapter_dependencies)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(course_id) DO UPDATE SET
+                key_points=excluded.key_points,
+                chapter_priorities=excluded.chapter_priorities,
+                relationships=excluded.relationships,
+                core_chapter_indices=excluded.core_chapter_indices,
+                chapter_dependencies=excluded.chapter_dependencies
+        """, (course_id, key_points, chapter_priorities, relationships, core_chapter_indices, chapter_dependencies))
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_global_highlights(course_id: str) -> Optional[dict]:
+    """获取全局精华"""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM global_highlights WHERE course_id=?", (course_id,)
+        ).fetchone()
+        if row:
+            d = dict(row)
+            d["key_points"] = json.loads(d.get("key_points") or "[]")
+            d["chapter_priorities"] = json.loads(d.get("chapter_priorities") or "[]")
+            d["core_chapter_indices"] = json.loads(d.get("core_chapter_indices") or "[]")
+            d["chapter_dependencies"] = json.loads(d.get("chapter_dependencies") or "{}")
+            return d
+        return None
+    finally:
+        conn.close()
+
+
+# ==================== 掌握进度 ====================
+
+def update_mastery_progress(course_id: str, progress_data: dict):
+    """更新课程掌握进度"""
+    conn = get_conn()
+    try:
+        conn.execute(
+            "UPDATE courses SET mastery_progress=? WHERE id=?",
+            (json.dumps(progress_data, ensure_ascii=False), course_id)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_mastery_progress(course_id: str) -> dict:
+    """获取课程掌握进度"""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT mastery_progress FROM courses WHERE id=?", (course_id,)
+        ).fetchone()
+        if row and row["mastery_progress"]:
+            return json.loads(row["mastery_progress"])
+        return {"total": 0, "mastered": [], "in_progress": [], "pending": [], "by_chapter": {}}
+    finally:
+        conn.close()
+
+
+# ==================== 思辨笔记（研读模式） ====================
+
+def add_spiritual_note(course_id: str, session_id: str, chapter_index: int,
+                       core_contradictions: str = "", unresolved_questions: str = "",
+                       extension_directions: str = "", personal_reflection: str = "",
+                       raw_content: str = "") -> int:
+    """添加思辨笔记"""
+    conn = get_conn()
+    try:
+        cur = conn.execute("""
+            INSERT INTO spiritual_notes
+            (course_id, session_id, chapter_index, core_contradictions, unresolved_questions,
+             extension_directions, personal_reflection, raw_content)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (course_id, session_id, chapter_index, core_contradictions, unresolved_questions,
+              extension_directions, personal_reflection, raw_content))
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_spiritual_notes(course_id: str) -> list:
+    """获取课程所有思辨笔记"""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM spiritual_notes WHERE course_id=? ORDER BY chapter_index, created_at",
+            (course_id,)
+        ).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["core_contradictions"] = json.loads(d.get("core_contradictions", "[]"))
+            d["unresolved_questions"] = json.loads(d.get("unresolved_questions", "[]"))
+            d["extension_directions"] = json.loads(d.get("extension_directions", "[]"))
+            result.append(d)
+        return result
+    finally:
+        conn.close()
+
+
+def get_spiritual_notes_by_session(session_id: str) -> list:
+    """获取指定会话的思辨笔记"""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM spiritual_notes WHERE session_id=? ORDER BY created_at",
+            (session_id,)
+        ).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["core_contradictions"] = json.loads(d.get("core_contradictions", "[]"))
+            d["unresolved_questions"] = json.loads(d.get("unresolved_questions", "[]"))
+            d["extension_directions"] = json.loads(d.get("extension_directions", "[]"))
+            result.append(d)
+        return result
     finally:
         conn.close()
