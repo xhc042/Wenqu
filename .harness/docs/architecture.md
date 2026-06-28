@@ -94,3 +94,4 @@ WebSocket /ws
 5. **多用户未支持** —— SQLite 单文件,适合单机;要做多用户要换 Postgres
 6. **WebSocket 会话清理** —— 客户端异常断开可能导致僵尸会话(**待修复**：v1.1 第二轮审查 P1-⑤)
 7. **LLM 配置同步分散** —— startup / `_sync_llm_from_db` / `update_llm_settings` 多处重复(**待修复**：v1.1 第二轮审查 P2-⑧)
+8. **`_get_course_group_chats` SQL bug (v1.3.1 已修复)** —— 历史 SQL 写 `s.created_at` 但 sessions 表只有 `started_at`,导致 `get_course_overview` 抛 `OperationalError`。原 bug 长期存在但未触发(无群聊数据时不会调用)。commit `ee0c02a` 修复。
