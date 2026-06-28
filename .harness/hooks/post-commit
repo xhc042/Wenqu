@@ -89,6 +89,52 @@ def run_tests():
         return None
 
 
+def check_commit_markers(msg, files):
+    """
+    检查 commit message 标记(方案 D：强化测试自动触发机制)
+    
+    验证 commit message 是否包含正确的 [test-added] / [doc-synced] 标记
+    如果 app.py 有改动但没有 [test-added],发出警告
+    """
+    has_app_py = "app.py" in files
+    has_test_added = "[test-added]" in msg
+    has_doc_synced = "[doc-synced]" in msg
+    has_skip_test = "[skip-test]" in msg
+    
+    warnings = []
+    
+    # 检查 app.py 改动是否有测试标记
+    if has_app_py and not has_test_added and not has_skip_test:
+        # 检查是否有新增测试文件
+        has_new_test = any(f.startswith("tests/test_") and f.endswith(".py") for f in files)
+        if not has_new_test:
+            warnings.append(
+                "⚠️  [标记检查] app.py 有改动但未标记 [test-added]\n"
+                "   → 如果新增了测试,请在 commit message 加 [test-added]\n"
+                "   → 如果不需要测试,请加 [skip-test]"
+            )
+    
+    # 检查文档改动是否有文档标记
+    has_arch_md = ".harness/docs/architecture.md" in files
+    has_code_style_md = ".harness/docs/code-style.md" in files
+    if (has_arch_md or has_code_style_md) and not has_doc_synced:
+        warnings.append(
+            "⚠️  [标记检查] 文档有改动但未标记 [doc-synced]\n"
+            "   → 请在 commit message 加 [doc-synced]"
+        )
+    
+    if warnings:
+        print("\n" + "=" * 60)
+        print("[hook] Commit 标记检查(warning):")
+        for w in warnings:
+            print(w)
+            print()
+        print("=" * 60)
+        return False
+    
+    return True
+
+
 def print_review_checklist(files):
     """打印 code-reviewer 的重点 checklist(对应 .harness/reins/code-reviewer/agent.md)"""
     has_python = any(f.endswith(".py") for f in files)
@@ -124,6 +170,67 @@ def print_review_checklist(files):
         print("  - 是否承认 producer reins runtime 不可 spawn")
     if not triggered:
         print("[hook] 本次改动不触发任何 review checklist(只改了 docs / assets)")
+
+
+def check_doc_sync(files):
+    """
+    检查文档同步(方案 C：hook 层面强制文档同步)
+    
+    如果 app.py 有改动,检查 architecture.md 和 code-style.md 是否同步更新
+    如果新增核心函数,检查 tests/ 是否新增对应测试文件
+    """
+    has_app_py = "app.py" in files
+    has_arch_md = ".harness/docs/architecture.md" in files
+    has_code_style_md = ".harness/docs/code-style.md" in files
+    has_new_test = any(f.startswith("tests/test_") and f.endswith(".py") for f in files)
+    
+    # 检查新增的测试文件名
+    new_test_files = [f for f in files if f.startswith("tests/test_") and f.endswith(".py")]
+    
+    warnings = []
+    
+    if has_app_py and not has_arch_md:
+        warnings.append(
+            "⚠️  [文档同步] app.py 有改动,但 .harness/docs/architecture.md 未同步更新\n"
+            "   → 请在'速读模式'或'核心数据流'章节添加说明\n"
+            "   → 请在'已知技术债'中标记已修复/待修复项"
+        )
+    
+    if has_app_py and not has_code_style_md:
+        # 检查是否涉及编码规范改动
+        import subprocess
+        try:
+            diff_result = subprocess.run(
+                ["git", "diff", "HEAD~1", "HEAD", "--", "app.py"],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+            )
+            if "encoding" in diff_result.stdout or "utf-8" in diff_result.stdout:
+                warnings.append(
+                    "⚠️  [文档同步] app.py 涉及编码规范改动,.harness/docs/code-style.md 未同步更新\n"
+                    "   → 请在'数据库'章节新增'中文环境编码规范'子条目"
+                )
+        except Exception:
+            pass
+    
+    if has_app_py and not has_new_test:
+        warnings.append(
+            "⚠️  [测试同步] app.py 有改动,但未检测到新增测试文件\n"
+            "   → 请新增 test_<module>.py 覆盖核心函数\n"
+            "   → 运行 pytest -m 'not slow' 确保全部通过"
+        )
+    
+    if warnings:
+        print("\n" + "=" * 60)
+        print("[hook] 文档同步检查(warning):")
+        for w in warnings:
+            print(w)
+            print()
+        print("=" * 60)
+        return False
+    
+    return True
 
 
 def write_log(files, tests_passed):
@@ -172,6 +279,19 @@ def main():
     print()
     print_review_checklist(files)
     print()
+    
+    # 方案 C：文档同步检查
+    doc_sync_ok = check_doc_sync(files)
+    if not doc_sync_ok:
+        print("[hook] ⚠️  文档同步检查未通过,请参照上方 warning 补充")
+    print()
+    
+    # 方案 D：Commit message 标记检查
+    marker_ok = check_commit_markers(msg, files)
+    if not marker_ok:
+        print("[hook] ⚠️  Commit 标记检查未通过,请参照上方 warning 补充")
+    print()
+    
     write_log(files, tests_passed)
 
     return 0  # 永远不阻塞 commit

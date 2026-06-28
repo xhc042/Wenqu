@@ -25,6 +25,13 @@ description: 问渠项目的开发者 rein,负责 app.py / chunker.py / state_ma
 - **LLM 调用通过 `llm_client.llm.chat_json` 或 `multi_llm`**,不直接用 `httpx`
 - 改动前先看 `AGENTS.md` 和 `.harness/docs/architecture.md`
 - 命名: 文件/函数/变量 `snake_case`,中文 docstring(产品向)
+- **中文环境编码规范**:所有代码必须在中文 Windows 环境下正常运行,避免乱码
+  - 所有文件读写必须显式指定 `encoding="utf-8"`(如 `open(path, encoding="utf-8")`、`aiofiles.open(path, encoding="utf-8")`)
+  - 数据库操作中的中文字符串必须使用参数化查询(`?` 占位符),禁止字符串拼接
+  - HTTP 响应头、WebSocket 消息中的中文必须正确序列化(JSON 自带 UTF-8)
+  - 日志输出中文内容时使用 `ensure_ascii=False`
+  - 前端交互涉及的中文文本,后端返回前确保已正确编码
+  - **禁止使用 `gbk`/`gb2312`/`big5` 等本地编码**,统一 UTF-8
 
 ### Frontend 红线(过渡期)
 
@@ -68,3 +75,43 @@ description: 问渠项目的开发者 rein,负责 app.py / chunker.py / state_ma
 - 对应的测试由 tester 处理
 - 给 harness 1-2 行说明: 改了什么、影响哪些模块、需不需要同步改 schema 或 prompt
 - 前端改动额外说明: 是否触发 frontend-owner 拆分条件
+
+## 强制同步规则(v1.1 第二轮审查新增)
+
+**修改业务代码时,必须同步完成以下操作**:
+
+### 1. 文档同步(必须)
+- 修改 `app.py` 核心函数(如 `_utc`, `_persist_speed_results`, `_save_chapters_to_db`) → **必须同步更新** `.harness/docs/architecture.md`
+  - 在"核心数据流"或"速读模式"章节添加说明
+  - 在"已知技术债"中标记已修复/待修复项
+- 修改编码规范/数据库操作 → **必须同步更新** `.harness/docs/code-style.md`
+  - 在对应章节新增子条目说明
+  - 引用 developer rein 的编码规范
+- 修改 `.harness/reins/*/agent.md` → **必须同步更新** `AGENTS.md`
+  - 更新 agent team 表格或描述
+
+### 2. 测试同步(必须)
+- 修改核心函数(公共函数、工具函数) → **必须同步新增测试文件**
+  - `_utc` → `test_utc_format.py`
+  - `_save_chapters_to_db` → `test_save_chapters.py`
+  - `_persist_speed_results` → 追加到 `test_speed_postprocess.py`
+- 新增业务逻辑 → **必须同步新增测试用例**
+  - 文件名 `test_<module>.py`,与被测模块同名
+  - 数据库测试用 `_temp_db` fixture 隔离
+- **不要改完业务代码直接说"完事"** — 测试必须跑过(`pytest -m "not slow"`)
+
+### 3. Commit Message 标记(必须)
+- 新增测试 → commit message 加 `[test-added]` 标记
+  - 例: `fix: 修复 _utc 函数空字符串处理 [test-added]`
+- 更新文档 → commit message 加 `[doc-synced]` 标记
+  - 例: `docs: 更新 architecture.md 速读模式事务包装 [doc-synced]`
+- 同时有测试和文档 → 标记 `[test-added][doc-synced]`
+
+### 4. 检查清单(提交前自验)
+```
+□ 代码改动是否影响了 architecture.md？是 → 同步更新
+□ 代码改动是否涉及编码规范？是 → 同步更新 code-style.md
+□ 新增/修改了核心函数？是 → 同步新增测试
+□ 测试是否全部通过？是 → pytest -m "not slow" 100% PASS
+□ Commit message 是否有正确标记？是 → [test-added]/[doc-synced]
+```
