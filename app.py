@@ -39,16 +39,10 @@ from state_machine import DialogueStateMachine
 from llm_client import llm
 
 # ==================== 异步任务管理系统 ====================
-# 任务状态枚举
-TASK_STATUS = {
-    "PENDING": "pending",
-    "PROCESSING": "processing",
-    "COMPLETED": "completed",
-    "FAILED": "failed",
-}
-
-# 内存任务存储: {task_id: {"status", "progress", "steps", "current_step", "course_id", "error"}}
-async_tasks: dict[str, dict] = {}
+# v1.1.3 重构: async_tasks 和锁已移至 routes/task_routes.py
+from routes.task_routes import (
+    async_tasks, _tasks_lock as _async_tasks_lock, TASK_STATUS,
+)
 
 def _utc(dt):
     if not dt or not isinstance(dt, str) or not dt.strip():
@@ -525,18 +519,19 @@ async def create_chapter_generation_task(data: dict):
         {"name": "完成", "status": "pending", "detail": ""},
     ]
     steps = [s for s in steps if s is not None]
-    async_tasks[task_id] = {
-        "task_id": task_id,
-        "course_id": course_id,
-        "type": "chapters_generate",
-        "status": TASK_STATUS["PENDING"],
-        "progress": 0,
-        "steps": steps,
-        "current_step": 0,
-        "result": None,
-        "error": None,
-        "created_at": datetime.now().isoformat(),
-    }
+    async with _async_tasks_lock:
+        async_tasks[task_id] = {
+            "task_id": task_id,
+            "course_id": course_id,
+            "type": "chapters_generate",
+            "status": TASK_STATUS["PENDING"],
+            "progress": 0,
+            "steps": steps,
+            "current_step": 0,
+            "result": None,
+            "error": None,
+            "created_at": datetime.now().isoformat(),
+        }
     
     # 启动后台任务
     asyncio.create_task(run_chapter_generation(task_id))
@@ -708,15 +703,16 @@ async def get_task_status(task_id: str):
 @app.delete("/api/tasks/{task_id}")
 async def cancel_task(task_id: str):
     """取消异步任务"""
-    task = async_tasks.get(task_id)
-    if not task:
-        raise HTTPException(404, "任务不存在")
-    
-    if task["status"] in [TASK_STATUS["COMPLETED"], TASK_STATUS["FAILED"]]:
-        return {"status": "already_finished"}
-    
-    task["status"] = TASK_STATUS["FAILED"]
-    task["error"] = "用户取消"
+    async with _async_tasks_lock:
+        task = async_tasks.get(task_id)
+        if not task:
+            raise HTTPException(404, "任务不存在")
+        
+        if task["status"] in [TASK_STATUS["COMPLETED"], TASK_STATUS["FAILED"]]:
+            return {"status": "already_finished"}
+        
+        task["status"] = TASK_STATUS["FAILED"]
+        task["error"] = "用户取消"
     return {"status": "cancelled"}
 
 
@@ -808,22 +804,23 @@ async def create_course(data: dict):
     task_id = None
     if source_type != "recommendation" and source_path:
         task_id = str(uuid.uuid4())[:8]
-        async_tasks[task_id] = {
-            "task_id": task_id,
-            "course_id": course_id,
-            "type": "chapters_generate",
-            "status": TASK_STATUS["PENDING"],
-            "progress": 0,
-            "steps": [
-                {"name": "正在智能分章...", "status": "pending", "detail": ""},
-                {"name": "生成教学大纲", "status": "pending", "detail": ""},
-                {"name": "完成", "status": "pending", "detail": ""},
-            ],
-            "current_step": 0,
-            "result": None,
-            "error": None,
-            "created_at": datetime.now().isoformat(),
-        }
+        async with _async_tasks_lock:
+            async_tasks[task_id] = {
+                "task_id": task_id,
+                "course_id": course_id,
+                "type": "chapters_generate",
+                "status": TASK_STATUS["PENDING"],
+                "progress": 0,
+                "steps": [
+                    {"name": "正在智能分章...", "status": "pending", "detail": ""},
+                    {"name": "生成教学大纲", "status": "pending", "detail": ""},
+                    {"name": "完成", "status": "pending", "detail": ""},
+                ],
+                "current_step": 0,
+                "result": None,
+                "error": None,
+                "created_at": datetime.now().isoformat(),
+            }
         # 启动后台任务
         import logging
         logging.info(f"[异步任务] 创建任务 {task_id} 用于课程 {course_id}")
@@ -883,18 +880,19 @@ async def get_course(course_id: str):
 
     # 查询该课程的活跃分章任务
     active_task = None
-    for task_id, task in async_tasks.items():
-        if task.get("course_id") == course_id and task.get("status") in ["pending", "processing"]:
-            active_task = {
-                "task_id": task["task_id"],
-                "type": task["type"],
-                "status": task["status"],
-                "progress": task["progress"],
-                "steps": task["steps"],
-                "current_step": task["current_step"],
-                "error": task.get("error"),
-            }
-            break
+    async with _async_tasks_lock:
+        for task_id, task in async_tasks.items():
+            if task.get("course_id") == course_id and task.get("status") in ["pending", "processing"]:
+                active_task = {
+                    "task_id": task["task_id"],
+                    "type": task["type"],
+                    "status": task["status"],
+                    "progress": task["progress"],
+                    "steps": task["steps"],
+                    "current_step": task["current_step"],
+                    "error": task.get("error"),
+                }
+                break
 
     # ?????????????
     all_group_chats = []
