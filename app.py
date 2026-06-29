@@ -693,11 +693,15 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                     db.update_syllabus_item(chapter_pending[0]["id"], "mastered")
                     sm.session_mastered_ids.add(chapter_pending[0]["id"])
                     await websocket.send_json({"state": "MASTERED_SKIPPED", "syllabus_id": chapter_pending[0]["id"]})
+                # 重新加载 syllabus_items 以获取最新的掌握状态
+                sm.syllabus_items = db.get_syllabus_items(course_id)
                 await websocket.send_json({"state": "TURN_DONE"})
                 await asyncio.sleep(0.2)
                 async for chunk in sm._probe():
                     await websocket.send_json({"state": "PROBE", "content": chunk})
                 await websocket.send_json({"state": "PROBE_DONE"})
+                # 发送 WAIT_USER 状态以启用前端输入框和"我已掌握"按钮
+                await websocket.send_json({"state": "WAIT_USER", "timeout": 120})
                 continue
 
             full_response = ""
