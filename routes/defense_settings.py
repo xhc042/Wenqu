@@ -19,14 +19,19 @@ from fastapi import HTTPException
 import database as db
 from config import (
     ROLES_META, DEFAULT_SLIDERS, DEPTH_CONFIG,
-    DEFAULT_MODEL, DEFAULT_TEMPERATURE, DEFAULT_TOP_P,
-    MAX_CONCURRENT_SESSIONS, DEFAULT_MAX_TOKENS,
     MODEL_TIER_CONFIG, DEFAULT_MODEL_TIER,
     DEFAULT_READING_MODE, READING_MODE_CONFIG,
 )
 from llm_client import llm
 
 logger = logging.getLogger(__name__)
+
+# 默认配置值（config.py 中没有这些常量，在此定义）
+_DEFAULT_MODEL = "gpt-4o-mini"
+_DEFAULT_TEMPERATURE = 0.7
+_DEFAULT_TOP_P = 1.0
+_DEFAULT_MAX_CONCURRENT_SESSIONS = 5
+_DEFAULT_MAX_TOKENS = 4096
 
 
 # ==================== 答辩相关 ====================
@@ -287,11 +292,11 @@ async def api_issue_certificate(course_id: str):
 async def api_get_llm_config():
     """获取 LLM 配置"""
     return {
-        "default_model": DEFAULT_MODEL,
-        "default_temperature": DEFAULT_TEMPERATURE,
-        "default_top_p": DEFAULT_TOP_P,
-        "max_concurrent_sessions": MAX_CONCURRENT_SESSIONS,
-        "default_max_tokens": DEFAULT_MAX_TOKENS,
+        "default_model": _DEFAULT_MODEL,
+        "default_temperature": _DEFAULT_TEMPERATURE,
+        "default_top_p": _DEFAULT_TOP_P,
+        "max_concurrent_sessions": _DEFAULT_MAX_CONCURRENT_SESSIONS,
+        "default_max_tokens": _DEFAULT_MAX_TOKENS,
         "model_tier_config": MODEL_TIER_CONFIG,
         "default_model_tier": DEFAULT_MODEL_TIER,
     }
@@ -299,8 +304,6 @@ async def api_get_llm_config():
 
 async def api_update_llm_config(config: dict):
     """更新 LLM 配置"""
-    from config import DEFAULT_MODEL, DEFAULT_TEMPERATURE, DEFAULT_TOP_P, MAX_CONCURRENT_SESSIONS, DEFAULT_MAX_TOKENS, MODEL_TIER_CONFIG, DEFAULT_MODEL_TIER
-
     updates = {}
     if "default_model" in config:
         updates["DEFAULT_MODEL"] = config["default_model"]

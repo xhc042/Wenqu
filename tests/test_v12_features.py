@@ -22,8 +22,7 @@ from state_machine import DialogueStateMachine
 @pytest.mark.asyncio
 async def test_p1_uses_key_points_when_available(monkeypatch):
     """P1-①: 当 highlights.key_points 非空时，syllabus_items 来源就是 key_points"""
-    import app
-    from app import _run_speed_mode_postprocess
+    from routes.course_routes import _run_speed_mode_postprocess
 
     chapters = [
         ("第1章", "内容1", {"idx": 0}),
@@ -48,8 +47,8 @@ async def test_p1_uses_key_points_when_available(monkeypatch):
             "chapter_dependencies": {},
         }
 
-    with patch("app.extract_chapter_snapshots_batch", new_callable=AsyncMock) as mock_batch, \
-         patch("app.generate_global_highlights", new_callable=AsyncMock) as mock_high:
+    with patch("routes.course_routes.extract_chapter_snapshots_batch", new_callable=AsyncMock) as mock_batch, \
+         patch("routes.course_routes.generate_global_highlights", new_callable=AsyncMock) as mock_high:
         mock_batch.side_effect = fake_batch
         mock_high.side_effect = fake_highlights_fn
 

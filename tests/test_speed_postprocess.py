@@ -9,9 +9,8 @@ from unittest.mock import AsyncMock, patch, MagicMock
 @pytest.mark.asyncio
 async def test_speed_postprocess_returns_complete_result(monkeypatch):
     """P0-①：10 章输入验证返回 dict 字段齐全"""
-    # 必须先 import app 以触发 _run_speed_mode_postprocess 注册
-    import app
-    from app import _run_speed_mode_postprocess
+    # 必须先 import routes.course_routes 以触发 _run_speed_mode_postprocess 注册
+    from routes.course_routes import _run_speed_mode_postprocess
 
     chapters = [
         ("第1章", "首段内容\n\n尾段内容", {"idx": 0, "level": 0}),
@@ -58,8 +57,8 @@ async def test_speed_postprocess_returns_complete_result(monkeypatch):
     async def fake_syllabus_fn(course_id, chs, snaps):
         return fake_syllabus
 
-    with patch("app.extract_chapter_snapshots_batch", new_callable=AsyncMock) as mock_batch, \
-         patch("app.generate_global_highlights", new_callable=AsyncMock) as mock_high, \
+    with patch("routes.course_routes.extract_chapter_snapshots_batch", new_callable=AsyncMock) as mock_batch, \
+         patch("routes.course_routes.generate_global_highlights", new_callable=AsyncMock) as mock_high, \
          patch("app.generate_speed_read_syllabus", new_callable=AsyncMock, create=True) as mock_syll:
         # mock 批量接口
         async def fake_batch(chs, concurrency=3):
@@ -86,8 +85,7 @@ async def test_speed_postprocess_returns_complete_result(monkeypatch):
 @pytest.mark.asyncio
 async def test_speed_syllabus_fallback_to_learning_goal(monkeypatch):
     """P1-④：generate_speed_read_syllabus 返回空时，应使用 snapshot.learning_goal 兜底"""
-    import app
-    from app import _run_speed_mode_postprocess
+    from routes.course_routes import _run_speed_mode_postprocess
 
     chapters = [
         ("第1章", "内容1", {"idx": 0}),
@@ -109,8 +107,8 @@ async def test_speed_syllabus_fallback_to_learning_goal(monkeypatch):
     async def fake_syllabus_fn(course_id, chs, snaps):
         return []   # 关键：syllabus 返回空
 
-    with patch("app.extract_chapter_snapshots_batch", new_callable=AsyncMock) as mock_batch, \
-         patch("app.generate_global_highlights", new_callable=AsyncMock) as mock_high, \
+    with patch("routes.course_routes.extract_chapter_snapshots_batch", new_callable=AsyncMock) as mock_batch, \
+         patch("routes.course_routes.generate_global_highlights", new_callable=AsyncMock) as mock_high, \
          patch("app.generate_speed_read_syllabus", new_callable=AsyncMock, create=True) as mock_syll:
         mock_batch.side_effect = fake_batch
         mock_high.side_effect = fake_highlights_fn
@@ -128,8 +126,7 @@ async def test_speed_syllabus_fallback_to_learning_goal(monkeypatch):
 @pytest.mark.asyncio
 async def test_speed_syllabus_exception_isolated(monkeypatch):
     """P1-④ 异常隔离：syllabus 函数抛异常不影响整体流程"""
-    import app
-    from app import _run_speed_mode_postprocess
+    from routes.course_routes import _run_speed_mode_postprocess
 
     chapters = [("第1章", "内容1", {"idx": 0})]
     chapter_titles = ["第1章"]
@@ -149,8 +146,8 @@ async def test_speed_syllabus_exception_isolated(monkeypatch):
     async def fake_syllabus_fn(course_id, chs, snaps):
         raise RuntimeError("模拟 LLM 抛异常")
 
-    with patch("app.extract_chapter_snapshots_batch", new_callable=AsyncMock) as mock_batch, \
-         patch("app.generate_global_highlights", new_callable=AsyncMock) as mock_high, \
+    with patch("routes.course_routes.extract_chapter_snapshots_batch", new_callable=AsyncMock) as mock_batch, \
+         patch("routes.course_routes.generate_global_highlights", new_callable=AsyncMock) as mock_high, \
          patch("app.generate_speed_read_syllabus", new_callable=AsyncMock, create=True) as mock_syll:
         mock_batch.side_effect = fake_batch
         mock_high.side_effect = fake_highlights_fn
@@ -171,8 +168,7 @@ async def test_speed_persist_writes_to_db(monkeypatch, tmp_path):
     """P0-①：_persist_speed_results 正确写入 chapter_snapshots / global_highlights / syllabus_items"""
     import os
     import uuid
-    import app
-    from app import _persist_speed_results
+    from routes.course_routes import _persist_speed_results
 
     # 用 uuid 命名 DB 文件，避开 tmp_path 复用 + sqlite WAL 残留
     db_path = str(tmp_path / f"test_{uuid.uuid4().hex[:8]}.db")
@@ -236,8 +232,7 @@ async def test_persist_speed_results_transaction_rollback(monkeypatch, tmp_path)
     修复第二轮审查 P1-②
     """
     import uuid
-    import app
-    from app import _persist_speed_results
+    from routes.course_routes import _persist_speed_results
 
     db_path = str(tmp_path / f"test_txn_{uuid.uuid4().hex[:8]}.db")
     import database
@@ -295,7 +290,7 @@ async def test_persist_speed_results_partial_failure_rollback(monkeypatch, tmp_p
     验证：如果 syllabus_items 写入失败（外键约束），前面的快照和精华也应被回滚
     """
     import uuid
-    from app import _persist_speed_results
+    from routes.course_routes import _persist_speed_results
 
     db_path = str(tmp_path / f"test_partial_{uuid.uuid4().hex[:8]}.db")
     import database
@@ -350,8 +345,7 @@ async def test_speed_postprocess_passes_callback_to_batch(monkeypatch):
     """
     验证：_run_speed_mode_postprocess 把 progress_callback 透传给 extract_chapter_snapshots_batch
     """
-    import app
-    from app import _run_speed_mode_postprocess
+    from routes.course_routes import _run_speed_mode_postprocess
 
     chapters = [("第1章", "内容1", {"idx": 0})]
     chapter_titles = ["第1章"]
@@ -379,8 +373,8 @@ async def test_speed_postprocess_passes_callback_to_batch(monkeypatch):
     async def fake_syllabus_fn(course_id, chs, snaps):
         return []
 
-    with patch("app.extract_chapter_snapshots_batch", new_callable=AsyncMock) as mock_batch, \
-         patch("app.generate_global_highlights", new_callable=AsyncMock) as mock_high, \
+    with patch("routes.course_routes.extract_chapter_snapshots_batch", new_callable=AsyncMock) as mock_batch, \
+         patch("routes.course_routes.generate_global_highlights", new_callable=AsyncMock) as mock_high, \
          patch("app.generate_speed_read_syllabus", new_callable=AsyncMock, create=True) as mock_syll:
         mock_batch.side_effect = fake_batch
         mock_high.side_effect = fake_highlights_fn
@@ -401,8 +395,7 @@ async def test_speed_postprocess_serial_fallback_also_calls_callback(monkeypatch
     """
     验证：批量全失败回退到串行时，progress_callback 仍被触发
     """
-    import app
-    from app import _run_speed_mode_postprocess
+    from routes.course_routes import _run_speed_mode_postprocess
 
     chapters = [("第1章", "内容1", {"idx": 0}), ("第2章", "内容2", {"idx": 1})]
     chapter_titles = ["第1章", "第2章"]
@@ -430,9 +423,9 @@ async def test_speed_postprocess_serial_fallback_also_calls_callback(monkeypatch
     async def fake_syllabus_fn(course_id, chs, snaps):
         return []
 
-    with patch("app.extract_chapter_snapshots_batch", new_callable=AsyncMock) as mock_batch, \
-         patch("app.extract_chapter_snapshot", new_callable=AsyncMock) as mock_snap, \
-         patch("app.generate_global_highlights", new_callable=AsyncMock) as mock_high, \
+    with patch("routes.course_routes.extract_chapter_snapshots_batch", new_callable=AsyncMock) as mock_batch, \
+         patch("routes.course_routes.extract_chapter_snapshot", new_callable=AsyncMock) as mock_snap, \
+         patch("routes.course_routes.generate_global_highlights", new_callable=AsyncMock) as mock_high, \
          patch("app.generate_speed_read_syllabus", new_callable=AsyncMock, create=True) as mock_syll:
         mock_batch.side_effect = fake_batch
         mock_snap.side_effect = fake_snap

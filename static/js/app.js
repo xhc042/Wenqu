@@ -1157,6 +1157,14 @@ function renderChapters(chapters, syllabus, chapterSessionCounts = {}, readingMo
                     ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px">${ch.keywords.map(k => `<span style="font-size:11px;padding:2px 8px;background:rgba(108,92,231,0.1);color:var(--accent);border-radius:10px">${escapeHtml(k)}</span>`).join('')}</div>`
                     : '';
 
+                // 掌握项标签
+                const masteryTags = chapterSyllabus.length > 0 ? chapterSyllabus.map(s => {
+                    const displayText = s.description.slice(0, 40) + (s.description.length > 40 ? '...' : '');
+                    const isMastered = s.status === 'mastered';
+                    return `<span class="tag tag-${isMastered ? 'mastered' : s.status === 'in_progress' ? 'progress' : 'pending'}" style="margin:2px 2px;cursor:pointer;font-size:10px" title="${s.description}" onclick="viewSyllabusDetail(${s.id}, this.title)">${displayText}${isMastered ? ' ✅' : ''}</span>` +
+                        (isMastered ? '' : `<button class="btn btn-xs" style="font-size:9px;padding:0 3px;margin-left:1px;vertical-align:middle;border:none;background:var(--success);color:#fff;border-radius:3px;cursor:pointer" onclick="event.stopPropagation();markSyllabusMastered(${s.id}, this)" title="标记为已掌握">✓</button>`);
+                }).join('') : '';
+
                 div.innerHTML = `
                     <div class="chapter-index">${levelIcon}</div>
                     <div class="chapter-info">
@@ -1168,7 +1176,9 @@ function renderChapters(chapters, syllabus, chapterSessionCounts = {}, readingMo
                         ${keywordsHtml}
                         <div class="chapter-items-count" style="color:#636e72;font-size:12px;margin-top:4px">
                             ${sessionCount > 0 ? `<span style="color:var(--success)">✅ 已学习 ${sessionCount} 次</span>` : '<span>💡 快速浏览即可</span>'}
+                            ${chapterSyllabus.length > 0 ? `<span style="margin-left:8px">📊 ${mastered}/${total} 项掌握</span>` : ''}
                         </div>
+                        ${masteryTags ? `<div style="margin-top:6px;flex-wrap:wrap">${masteryTags}</div>` : ''}
                     </div>
                     <div class="chapter-actions">
                         ${sessionCount > 0 ? `<button class="btn btn-outline btn-sm chapter-history-btn" onclick="event.stopPropagation();showChapterHistory(${ch.idx})" title="查看学习历史">📜</button>` : ''}
@@ -2547,7 +2557,7 @@ async function loadLearningHistory() {
         const stats = cd.learning_stats || {};
         const totalSessions = history.length;
         const totalMsg = history.reduce((s, h) => s + h.message_count, 0);
-        const totalRounds = history.reduce((s, h) => s + (h.session.total_rounds || 0), 0);
+        const totalRounds = history.reduce((s, h) => s + (h.total_rounds || 0), 0);
         const totalMinutes = stats.total_minutes || 0;
         const totalTokens = stats.total_tokens || 0;
         const hrs = Math.floor(totalMinutes / 60);
@@ -2617,12 +2627,13 @@ async function loadLearningHistory() {
         html += `<div style="font-size:14px;font-weight:600;margin-bottom:12px;margin-top:20px">📖 对话记录</div>`;
 
         html += history.map((h, idx) => {
-            const s = h.session;
-            const date = s.ended_at ? fmtTime(s.ended_at) : (s.started_at ? fmtTime(s.started_at) : '未知');
-            const teacherName = AppState.roles[s.teacher_role_id]?.name || s.teacher_role_id;
-            const teacherEmoji = AppState.roles[s.teacher_role_id]?.emoji || '🎓';
-            const chapterTitle = h.chapter_title || `第${s.chapter_index + 1}章`;
+            const date = h.ended_at ? fmtTime(h.ended_at) : (h.started_at ? fmtTime(h.started_at) : '未知');
+            const teacherName = AppState.roles[h.teacher_role_id]?.name || h.teacher_role_id;
+            const teacherEmoji = AppState.roles[h.teacher_role_id]?.emoji || '🎓';
+            const chapterTitle = h.chapter_title || `第${h.chapter_index + 1}章`;
             const order = history.length - idx;
+            const isActive = h.is_active;
+            const durationText = h.duration_minutes ? `${h.duration_minutes}分钟` : '';
 
             // 产出物
             let outputsHtml = '';
@@ -2638,25 +2649,33 @@ async function loadLearningHistory() {
             if (h.summaries && h.summaries.length > 0) {
                 outputsHtml += `<div style="margin:4px 0;font-size:12px">📋 复习总结 <span style="color:#b2bec3">${fmtTime(h.summaries[0].created_at)}</span></div>`;
             }
-            if (!outputsHtml) {
+            if (!outputsHtml && !isActive) {
                 outputsHtml = '<div style="color:#b2bec3;font-size:12px">课后产出物生成中...</div>';
             }
+            if (isActive) {
+                outputsHtml += '<div style="margin:4px 0;font-size:12px;color:var(--accent)">⏳ 学习中...</div>';
+            }
 
-            return `<div class="fade-in" style="background:var(--bg-secondary);border-radius:var(--radius-sm);padding:16px;margin-bottom:12px;border-left:3px solid var(--accent);box-shadow:var(--shadow)">
+            const borderColor = isActive ? 'var(--warning)' : 'var(--accent)';
+            const statusBadge = isActive ? '<span style="font-size:11px;padding:1px 6px;border-radius:4px;background:rgba(253,150,63,0.1);color:var(--warning);margin-left:6px">学习中</span>' : '';
+
+            return `<div class="fade-in" style="background:var(--bg-secondary);border-radius:var(--radius-sm);padding:16px;margin-bottom:12px;border-left:3px solid ${borderColor};box-shadow:var(--shadow)">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
                     <div>
                         <span style="font-size:12px;color:#b2bec3;font-weight:500">第${order}次</span>
                         <span style="font-weight:600;margin-left:8px">${teacherEmoji} ${teacherName}</span>
+                        ${statusBadge}
                     </div>
-                    <span style="font-size:12px;color:#636e72">${date} · ${h.message_count}条消息</span>
+                    <span style="font-size:12px;color:#636e72">${date} · ${h.message_count}条消息${durationText ? ` · ${durationText}` : ''}</span>
                 </div>
                 <div style="font-size:13px;margin-bottom:6px">
                     <span style="background:rgba(108,92,231,0.08);color:var(--accent);padding:2px 8px;border-radius:4px;font-size:12px">📖 ${chapterTitle}</span>
+                    <span style="font-size:12px;color:#636e72;margin-left:8px">💬 ${h.total_rounds || 0} 轮</span>
                 </div>
                 <div style="font-size:13px;margin-bottom:8px;color:var(--text-secondary)">
                     ${h.user_messages && h.user_messages.length > 0
                         ? h.user_messages.map(m => `"${m}"`).join(' → ')
-                        : ''}
+                        : (isActive ? '<span style="color:var(--warning)">对话进行中...</span>' : '')}
                 </div>
                 <div style="border-top:1px solid var(--border);padding-top:8px;margin-top:8px">
                     <div style="font-size:12px;font-weight:500;color:#636e72;margin-bottom:4px">课后产出：</div>

@@ -655,11 +655,13 @@ def create_session(course_id: str, chapter_index: int, teacher_role_id: str) -> 
 
 
 def end_session(session_id: str, total_rounds: int):
+    from datetime import datetime
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn = get_conn()
     try:
         conn.execute(
-            "UPDATE sessions SET ended_at=CURRENT_TIMESTAMP, total_rounds=? WHERE id=?",
-            (total_rounds, session_id),
+            "UPDATE sessions SET ended_at=?, total_rounds=?, started_at=COALESCE(started_at, ?) WHERE id=?",
+            (now, total_rounds, now, session_id),
         )
         conn.commit()
     finally:
