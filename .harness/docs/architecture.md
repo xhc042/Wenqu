@@ -5,7 +5,12 @@
 ## 模块依赖图
 
 ```
-app.py (FastAPI 路由 + 异步任务 + WebSocket)
+app.py (FastAPI 路由入口 + WebSocket + 异步任务协调)
+  ├── routes/ (v1.1.3 新增: 模块化路由)
+  │     ├── task_routes.py   — 异步任务管理(asyncio.Lock + threading.Lock 双重保护)
+  │     ├── course_routes.py — 课程 CRUD、分章、快照、掌握项
+  │     ├── chat_routes.py   — WebSocket 对话、会话管理
+  │     └── defense_settings.py — 答辩、LLM 配置、日记、证书
   ├── chunker.py (文本提取 + 分章 + EPUB 解析)
   │     └── llm_client.py
   ├── state_machine.py (对话状态机)
@@ -21,6 +26,8 @@ app.py (FastAPI 路由 + 异步任务 + WebSocket)
 - `config.py` 是叶子节点,被所有其他模块引用,改它影响面最大
 - `llm_client.py` 是 LLM 调用的统一入口,所有 AI 生成都走这里
 - `state_machine.py` 不直接调 LLM 生成完整回复,而是按状态调 LLM 生成对应片段
+- **v1.1.3: `routes/` 模块化拆分** — 将 `app.py` 中的路由按功能拆为 4 个模块,降低单文件复杂度
+- **v1.1.3: `async_tasks` 并发安全** — 新增 `asyncio.Lock` + `threading.Lock` 双重保护,消除竞态条件
 
 ## 核心数据流
 
@@ -94,9 +101,9 @@ WebSocket /ws
 
 ## 已知技术债
 
-1. **`async_tasks` 内存 dict** —— 服务重启会丢任务,未做 DB 持久化(**已修复**：`run_chapter_generation` 增加 `finally` 清理)
-2. **`app.py` 105KB 单文件** —— 路由 + 业务逻辑混杂,建议拆 `routers/`
-3. **测试覆盖率 0%** —— P0 模块(chunkier / state_machine)优先补(**已更新**：v1.1 第二轮审查新增 `test_utc_format.py`, `test_save_chapters.py`, `test_generate_chapters_structure.py`)
+1. **`async_tasks` 内存 dict** —— 服务重启会丢任务,未做 DB 持久化(**已修复**：`run_chapter_generation` 增加 `finally` 清理; **v1.1.3** 新增 asyncio.Lock + threading.Lock 双重并发保护)
+2. **`app.py` 单文件** ———— **v1.1.3 已部分解决**: 路由已拆至 `routes/` 四个模块(`task_routes.py`/`course_routes.py`/`chat_routes.py`/`defense_settings.py`)。`app.py` 仍保留原有函数定义以确保向后兼容,后续可逐步迁移路由注册。
+3. **测试覆盖率 0%** —— P0 模块(chunkier / state_machine)优先补(**已更新**：v1.1 第二轮审查新增 `test_utc_format.py`, `test_save_chapters.py`, `test_generate_chapters_structure.py`; **v1.1.3** 243 测试全部通过)
 4. **PDF 导入未支持** —— `app.py` 显式 400 拒绝,产品决策
 5. **多用户未支持** —— SQLite 单文件,适合单机;要做多用户要换 Postgres
 6. **WebSocket 会话清理** —— 客户端异常断开可能导致僵尸会话(**待修复**：v1.1 第二轮审查 P1-⑤)
