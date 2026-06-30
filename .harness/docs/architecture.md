@@ -88,6 +88,7 @@ WebSocket /ws
   - 三步写入(快照→精华→掌握项)在同一事务中
   - 任何步骤失败自动回滚，不会写入部分数据
 - **统一章节保存**：`_save_chapters_to_db()` 消除 `run_chapter_generation` 和 `generate_chapters` 重复逻辑(修复 v1.1 第二轮审查 P2)
+- **syllabus 真实 chapter_index (commit `fc35da8`)** —— `generate_syllabus_items` 支持 `(chapter_index, title, content)` 三元组优先用真实 idx(向后兼容二元组走 enumerate);`api_load_chapter_content` 加载单章节时传三元组 + 先 DELETE 该章节旧 syllabus,避免反复加载累积
 
 ## 关键模块速查
 
@@ -109,3 +110,4 @@ WebSocket /ws
 6. **WebSocket 会话清理** —— 客户端异常断开可能导致僵尸会话(**待修复**：v1.1 第二轮审查 P1-⑤)
 7. **LLM 配置同步分散** —— startup / `_sync_llm_from_db` / `update_llm_settings` 多处重复(**待修复**：v1.1 第二轮审查 P2-⑧)
 8. **`_get_course_group_chats` SQL bug (v1.3.1 已修复)** —— 历史 SQL 写 `s.created_at` 但 sessions 表只有 `started_at`,导致 `get_course_overview` 抛 `OperationalError`。原 bug 长期存在但未触发(无群聊数据时不会调用)。commit `ee0c02a` 修复。
+9. **syllabus_items 写入错位的 chapter_index (commit `fc35da8` 已修复)** —— 当 chapters 表的 idx 非 0-based 连续整数(如 EPUB 抽出来的 4~15),`generate_syllabus_items` / `_add_default_syllabus_items` 用 `enumerate(chapters)` 顺序 idx 写入,导致 syllabus 全部打到 ch 0(不存在的章节);`api_load_chapter_content` 又没 DELETE 旧 syllabus,反复加载会越积越多。结果是 PROBE 阶段按当前章节取 syllabus 取不到 → LLM 失去 syllabus 引导 → 不同课程的对话题目变得相似/重复。修复:`generate_syllabus_items` / `_add_default_syllabus_items` 支持 `(chapter_index, title, content)` 三元组优先用真实 idx;`api_load_chapter_content` 传三元组 + 加载前 DELETE 该章节旧 syllabus。新增 `tests/test_chunker_syllabus.py` 覆盖 8 个场景。
