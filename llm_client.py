@@ -11,6 +11,24 @@ from typing import AsyncGenerator, Optional, List, Dict, Any
 import httpx
 
 from config import get_llm_config, get_model_tier_config, DEPTH_CONFIG
+import database as db
+
+
+def _try_load_active_model_from_db(client):
+    """从数据库加载激活的模型配置（懒加载）
+    
+    Args:
+        client: LLMClient 实例
+    """
+    try:
+        active = db.get_active_model_with_provider()
+        if active:
+            client.api_key = active.get("api_key", "")
+            client.base_url = active.get("base_url", "").rstrip("/")
+            client.model = active.get("model_name", "")
+    except Exception as e:
+        # 懒加载失败不阻塞主流程
+        pass
 
 
 class LLMClient:
@@ -18,15 +36,55 @@ class LLMClient:
 
     def __init__(self, tier: str = "balanced"):
         cfg = get_model_tier_config(tier) if tier != "default" else get_llm_config()
-        self.api_key = cfg["api_key"]
-        self.base_url = cfg["base_url"].rstrip("/")
-        self.model = cfg["model"]
-        self.timeout = cfg.get("timeout", 60)
-        self.tier = tier
+        self._api_key = cfg["api_key"]
+        self._base_url = cfg["base_url"].rstrip("/")
+        self._model = cfg["model"]
+        self._timeout = cfg.get("timeout", 60)
+        self._tier = tier
+
+    @property
+    def api_key(self) -> str:
+        return self._api_key
+
+    @api_key.setter
+    def api_key(self, value: str) -> None:
+        self._api_key = value
+
+    @property
+    def base_url(self) -> str:
+        return self._base_url
+
+    @base_url.setter
+    def base_url(self, value: str) -> None:
+        self._base_url = value
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    @model.setter
+    def model(self, value: str) -> None:
+        self._model = value
+
+    @property
+    def timeout(self) -> int:
+        return self._timeout
+
+    @timeout.setter
+    def timeout(self, value: int) -> None:
+        self._timeout = value
+
+    @property
+    def tier(self) -> str:
+        return self._tier
+
+    @tier.setter
+    def tier(self, value: str) -> None:
+        self._tier = value
 
     def _headers(self) -> dict:
         return {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
 
@@ -37,18 +95,22 @@ class LLMClient:
         max_tokens: int = 2048,
     ) -> AsyncGenerator[str, None]:
         """流式对话"""
-        if not self.api_key:
-            yield "⚠️ 请先配置LLM API密钥。在设置中填入你的API Key。"
+        # 懒加载：如果还没有配置，尝试从数据库读取激活模型
+        if not self._api_key and not self._base_url and not self._model:
+            _try_load_active_model_from_db(self)
+
+        if not self._api_key:
+            yield "⚠️ 尚未配置模型，请在设置中添加并激活一个 LLM 提供商和模型。"
             return
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
             try:
                 async with client.stream(
                     "POST",
-                    f"{self.base_url}/chat/completions",
+                    f"{self._base_url}/chat/completions",
                     headers=self._headers(),
                     json={
-                        "model": self.model,
+                        "model": self._model,
                         "messages": messages,
                         "temperature": temperature,
                         "max_tokens": max_tokens,
@@ -86,11 +148,15 @@ class LLMClient:
         response_format: Optional[dict] = None,
     ) -> str:
         """非流式对话，返回完整响应"""
-        if not self.api_key:
-            return "⚠️ 请先配置LLM API密钥。"
+        # 懒加载：如果还没有配置，尝试从数据库读取激活模型
+        if not self._api_key and not self._base_url and not self._model:
+            _try_load_active_model_from_db(self)
+
+        if not self._api_key:
+            return "⚠️ 尚未配置模型，请在设置中添加并激活一个 LLM 提供商和模型。"
 
         body = {
-            "model": self.model,
+            "model": self._model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -98,10 +164,10 @@ class LLMClient:
         if response_format:
             body["response_format"] = response_format
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
             try:
                 resp = await client.post(
-                    f"{self.base_url}/chat/completions",
+                    f"{self._base_url}/chat/completions",
                     headers=self._headers(),
                     json=body,
                 )

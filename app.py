@@ -1348,6 +1348,14 @@ def _sync_llm_from_db():
         llm.api_key = active["api_key"]
         llm.base_url = active["base_url"].rstrip("/")
         llm.model = active["model_name"]
+    else:
+        # 如果没有激活的模型，清空配置并提示用户
+        LLM_CONFIG["api_key"] = ""
+        LLM_CONFIG["base_url"] = ""
+        LLM_CONFIG["model"] = ""
+        llm.api_key = ""
+        llm.base_url = ""
+        llm.model = ""
 
 
 # ==================== 课程设置 ====================

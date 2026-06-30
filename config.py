@@ -37,11 +37,11 @@ if not getattr(sys, 'frozen', False):
 # 数据库路径
 DB_PATH = DATA_DIR / "wenqu.db"
 
-# LLM 配置
+# LLM 配置（统一从数据库激活的 provider/model 读取，不再使用环境变量）
 LLM_CONFIG = {
-    "api_key": os.getenv("WENQU_API_KEY", ""),
-    "base_url": os.getenv("WENQU_BASE_URL", "https://api.deepseek.com"),
-    "model": os.getenv("WENQU_MODEL", "deepseek-chat"),
+    "api_key": "",
+    "base_url": "",
+    "model": "",
     "temperature": 0.7,
     "max_tokens": 2048,
     "timeout": 60,
@@ -338,21 +338,31 @@ def get_model_tier_config(tier: str) -> dict:
     cfg = dict(tier_cfg)
     # 如果该层级没有独立配置，复用主模型
     if not cfg.get("model"):
-        cfg["base_url"] = get_llm_config()["base_url"]
-        cfg["api_key"] = get_llm_config()["api_key"]
-        cfg["model"] = get_llm_config()["model"]
+        main_cfg = get_llm_config()
+        cfg["base_url"] = main_cfg["base_url"]
+        cfg["api_key"] = main_cfg["api_key"]
+        cfg["model"] = main_cfg["model"]
     return cfg
 
-# LLM API 配置（可动态修改）
+# LLM API 配置（可动态修改，统一从数据库激活的 provider/model 读取）
 def get_llm_config():
-    """获取当前LLM配置"""
+    """获取当前LLM配置（从数据库读取激活的 provider/model）"""
+    # 先同步数据库配置到 LLM_CONFIG
+    try:
+        from modules.llm_config_manager import sync_db_to_config
+        sync_db_to_config()
+    except Exception:
+        # 如果 llm_config_manager 不可用，使用当前 LLM_CONFIG
+        pass
+    
     cfg = dict(LLM_CONFIG)
-    if not cfg["api_key"]:
-        cfg["api_key"] = os.getenv("WENQU_API_KEY", "")
-    if not cfg["api_key"]:
-        cfg["api_key"] = os.getenv("OPENAI_API_KEY", "")
-    if not cfg["api_key"]:
-        cfg["api_key"] = os.getenv("DEEPSEEK_API_KEY", "")
+    # 检查是否有有效配置
+    if not cfg.get("model"):
+        cfg["model"] = ""
+    if not cfg.get("base_url"):
+        cfg["base_url"] = ""
+    if not cfg.get("api_key"):
+        cfg["api_key"] = ""
     return cfg
 
 def update_llm_config(**kwargs):

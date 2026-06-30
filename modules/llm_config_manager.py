@@ -29,9 +29,9 @@ _config_cache: dict = {
     "DEFAULT_MAX_TOKENS": 4096,
     "MODEL_TIER_CONFIG": MODEL_TIER_CONFIG,
     "DEFAULT_MODEL_TIER": DEFAULT_MODEL_TIER,
-    "DEFAULT_MODEL_FAST": "",
-    "DEFAULT_MODEL_BALANCED": "",
-    "DEFAULT_MODEL_FLAGSHIP": "",
+    "DEFAULT_MODEL_FAST": MODEL_TIER_CONFIG.get("fast", {}).get("model", ""),
+    "DEFAULT_MODEL_BALANCED": MODEL_TIER_CONFIG.get("balanced", {}).get("model", ""),
+    "DEFAULT_MODEL_FLAGSHIP": MODEL_TIER_CONFIG.get("flagship", {}).get("model", ""),
 }
 
 
@@ -73,7 +73,7 @@ def _get_setting_float(conn, key: str, fallback: float) -> float:
 
 
 def sync_db_to_config() -> dict:
-    """从数据库读取 LLM 配置并同步到运行时缓存。
+    """从数据库读取 LLM 配置并同步到运行时缓存和 config.LLM_CONFIG。
 
     Returns:
         同步后的配置字典，键名与 config.py 保持一致
@@ -90,9 +90,9 @@ def sync_db_to_config() -> dict:
         cache["DEFAULT_MODEL_TIER"] = _get_setting(conn, "default_model_tier", DEFAULT_MODEL_TIER)
 
         # 三级模型配置
-        cache["DEFAULT_MODEL_FAST"] = _get_setting(conn, "default_model_fast", DEFAULT_MODEL_FAST)
-        cache["DEFAULT_MODEL_BALANCED"] = _get_setting(conn, "default_model_balanced", DEFAULT_MODEL_BALANCED)
-        cache["DEFAULT_MODEL_FLAGSHIP"] = _get_setting(conn, "default_model_flagship", DEFAULT_MODEL_FLAGSHIP)
+        cache["DEFAULT_MODEL_FAST"] = _get_setting(conn, "default_model_fast", cache.get("DEFAULT_MODEL_FAST", ""))
+        cache["DEFAULT_MODEL_BALANCED"] = _get_setting(conn, "default_model_balanced", cache.get("DEFAULT_MODEL_BALANCED", ""))
+        cache["DEFAULT_MODEL_FLAGSHIP"] = _get_setting(conn, "default_model_flagship", cache.get("DEFAULT_MODEL_FLAGSHIP", ""))
 
         # MODEL_TIER_CONFIG 从三级模型配置动态构建
         cache["MODEL_TIER_CONFIG"] = {
@@ -100,6 +100,15 @@ def sync_db_to_config() -> dict:
             "balanced": cache["DEFAULT_MODEL_BALANCED"],
             "flagship": cache["DEFAULT_MODEL_FLAGSHIP"],
         }
+
+        # 同步到 config.py 的 LLM_CONFIG（用于 llm 单例）
+        # 从数据库获取激活的 provider/model
+        active = db.get_active_model_with_provider()
+        if active:
+            from config import LLM_CONFIG
+            LLM_CONFIG["api_key"] = active.get("api_key", "")
+            LLM_CONFIG["base_url"] = active.get("base_url", "")
+            LLM_CONFIG["model"] = active.get("model_name", "")
 
         logger.debug("LLM 配置已从数据库同步到运行时")
         return dict(cache)
