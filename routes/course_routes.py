@@ -114,15 +114,24 @@ def _save_chapters_to_db(course_id: str, chapters: list, reading_mode: str) -> l
 
 
 def _add_default_syllabus_items(course_id: str, chapters: list):
-    """生成默认掌握项（当LLM生成失败时使用）"""
+    """生成默认掌握项（当LLM生成失败时使用）
+
+    chapters 元素支持两种格式：
+      - (chapter_index, title, content)：三元组，用真实 chapter_index
+      - (title, content)：二元组，回退到 enumerate 顺序 idx（向后兼容）
+    """
     defaults = [
         "能用自己的话复述本章的核心观点",
         "能解释本章涉及的关键概念",
         "能用自己的话举例说明本章内容",
     ]
-    for idx, (title, _) in enumerate(chapters):
+    for i, item in enumerate(chapters):
+        if isinstance(item, tuple) and len(item) >= 3:
+            ch_idx = item[0]
+        else:
+            ch_idx = i
         for desc in defaults:
-            db.add_syllabus_item(course_id, idx, desc)
+            db.add_syllabus_item(course_id, ch_idx, desc)
 
 
 async def _run_speed_mode_postprocess(
@@ -662,7 +671,18 @@ async def api_load_chapter_content(course_id: str, chapter_idx: int):
     finally:
         conn.close()
 
-    items = await generate_syllabus_items(course_id, [(chapter["title"], full_content)])
+    items = await generate_syllabus_items(course_id, [(chapter_idx, chapter["title"], full_content)])
+    if items:
+        # 清掉该章节的旧 syllabus，避免反复加载累积导致 ch_idx 重复
+        conn = db.get_conn()
+        try:
+            conn.execute(
+                "DELETE FROM syllabus_items WHERE course_id=? AND chapter_index=?",
+                (course_id, chapter_idx),
+            )
+            conn.commit()
+        finally:
+            conn.close()
     for ch_idx, desc in items:
         db.add_syllabus_item(course_id, ch_idx, desc)
 
@@ -713,7 +733,11 @@ async def api_regenerate_syllabus(course_id: str):
     finally:
         conn.close()
 
-    ch_list = [(ch["title"], ch.get("content_slice", "")) for ch in chapters if ch.get("is_loaded", 1)]
+    # 保留真实 chapter_index（章节 idx 可能是非连续的，如 4~15）
+    ch_list = [
+        (ch["idx"], ch["title"], ch.get("content_slice", ""))
+        for ch in chapters if ch.get("is_loaded", 1)
+    ]
 
     if not ch_list:
         raise HTTPException(400, "无已加载章节")
@@ -748,7 +772,10 @@ async def api_generate_syllabus(course_id: str):
     if reading_mode == "speed":
         return {"total_items": 0, "message": "速读模式不生成掌握项"}
 
-    ch_list = [(ch["title"], ch.get("content_slice", "")) for ch in chapters if ch.get("is_loaded", 1)]
+    ch_list = [
+        (ch["idx"], ch["title"], ch.get("content_slice", ""))
+        for ch in chapters if ch.get("is_loaded", 1)
+    ]
     if not ch_list:
         return {"total_items": 0, "message": "无已加载章节，请先加载章节内容"}
 

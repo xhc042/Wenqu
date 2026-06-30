@@ -132,6 +132,8 @@ async def startup():
 
     # 统一从数据库同步 LLM 配置（使用新的配置管理器）
     sync_db_to_config()
+    # 将数据库中的激活模型同步到 llm 单例
+    _sync_llm_from_db()
 
 
 # ==================== 前端路由 ====================
@@ -280,7 +282,7 @@ async def run_chapter_generation(task_id: str):
             task["steps"][1]["detail"] = "正在生成掌握项..."
             
             chapters_db = db.get_chapters(course_id)
-            ch_list = [(ch["title"], ch.get("content_slice", "")) for ch in chapters_db if ch.get("is_loaded", 1)]
+            ch_list = [(ch["idx"], ch["title"], ch.get("content_slice", "")) for ch in chapters_db if ch.get("is_loaded", 1)]
             
             if ch_list:
                 _conn = db.get_conn()

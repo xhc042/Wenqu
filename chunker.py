@@ -1497,39 +1497,50 @@ async def generate_syllabus_items(
 ) -> list:
     """
     为每个章节生成 1~3 条掌握项（批量处理加速）
-    
+
     优化：每批 5 章合并为一次 LLM 调用，减少调用次数
     progress_callback(chapter_idx, total_chapters, message) 可选，用于进度更新
+
+    chapters 支持两种元素格式：
+      - 三元组 (chapter_index, title, content)：chapter_index 是 chapters 表的真实 idx
+      - 二元组 (title, content)：向后兼容，chapter_index 取 enumerate 顺序 idx
+        （⚠️ 若 chapters 表的 idx 不是 0-based 连续整数，请务必传三元组）
+
     返回 [(chapter_index, description), ...]
     """
     all_items = []
-    
+
     # 预处理章节列表
     chapter_data = []
     for idx, item in enumerate(chapters):
-        if isinstance(item, tuple) and len(item) >= 2:
-            ch_title, ch_content = item[0], item[1]
+        if isinstance(item, tuple) and len(item) >= 3:
+            # 三元组：直接采用调用方传入的真实 chapter_index
+            ch_idx, ch_title, ch_content = item[0], item[1], item[2]
+        elif isinstance(item, tuple) and len(item) >= 2:
+            # 二元组：回退到 enumerate 顺序 idx（保留旧行为以兼容外部调用）
+            ch_idx, ch_title, ch_content = idx, item[0], item[1]
         elif isinstance(item, dict):
+            ch_idx = item.get("idx", item.get("chapter_index", idx))
             ch_title = item.get("title", "")
             ch_content = item.get("content_slice", item.get("content", ""))
         else:
             continue
-        chapter_data.append((idx, ch_title, ch_content[:1500]))
-    
+        chapter_data.append((ch_idx, ch_title, ch_content[:1500]))
+
     total_chapters = len(chapter_data)
     BATCH_SIZE = 5  # 每批处理章节数
-    
+
     # 分批处理
     for batch_start in range(0, total_chapters, BATCH_SIZE):
         batch_end = min(batch_start + BATCH_SIZE, total_chapters)
         batch = chapter_data[batch_start:batch_end]
-        
-        # 构建批量 prompt
+
+        # 构建批量 prompt（用 batch 内顺序索引 1..N 跟 LLM 沟通，便于 LLM 严格按序返回）
         chapters_section = "\n\n".join([
-            f"【章节 {idx+1}】{title}\n内容：{content[:500]}"
-            for idx, title, content in batch
+            f"【章节 {i+1}】{title}\n内容：{content[:500]}"
+            for i, (_, title, content) in enumerate(batch)
         ])
-        
+
         prompt = f"""根据以下教材章节内容，为每个章节生成 1~3 条掌握项清单。
 
 要求：每条掌握项以"能..."开头，使用可验证的行为描述。
@@ -1550,25 +1561,25 @@ async def generate_syllabus_items(
             ])
             items = result.get("items", [])
             for item_obj in items:
-                ch_num = item_obj.get("chapter", 1) - 1  # 转为 0 索引
+                ch_num = item_obj.get("chapter", 1) - 1  # batch 内 1-based → 0-based
                 desc = item_obj.get("description", "")
                 if 0 <= ch_num < len(batch):
-                    actual_idx = batch[ch_num][0]
+                    actual_idx = batch[ch_num][0]  # 用 batch 中预存的真实 chapter_index
                     all_items.append((actual_idx, desc))
         except Exception:
-            # 批量失败时回退到默认项
-            for idx, title, _ in batch:
+            # 批量失败时回退到默认项（用真实 chapter_index）
+            for ch_idx, title, _ in batch:
                 defaults = [
                     f"能用自己的话复述{title}的核心内容",
                     f"能解释{title}中的关键概念",
                 ]
                 for d in defaults:
-                    all_items.append((idx, d))
-        
+                    all_items.append((ch_idx, d))
+
         # 更新进度
         if progress_callback:
             progress_callback(batch_end, total_chapters, f"正在生成掌握项... ({batch_end}/{total_chapters})")
-    
+
     return all_items
 
 
