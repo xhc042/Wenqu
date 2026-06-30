@@ -2,6 +2,11 @@
 
 问渠 (Wenqu) v1.1 —— 基于 FastAPI + SQLite + DeepSeek 的 AI 驱动苏格拉底式阅读学习平台。支持 EPUB / MD / TXT / URL 文本源,提供速读 / 标准 / 研读三种模式,内置 8 个 AI 教师角色与可调教学风格滑块。
 
+## Repository
+
+- GitHub: https://github.com/xhc042/Wenqu.git
+- 默认分支: `1.20`(其他详情见 "PR & commit conventions")
+
 ## 产品愿景(灵魂)
 
 读书的价值分三层,**这是问渠产品的核心定位**,改任何功能前先问自己在哪一层:
@@ -30,7 +35,7 @@
 - `llm_client.py` — LLM 抽象(chat_json / multi_llm / 思考标签剥离)
 - `prompts/roles/*.md` — 8 个 AI 教师角色 prompt(march7/keqing/ganyu/socrates/linmo/yunyi/zhiwei/yunxiu)
 - `static/` — 前端(index.html + 原生 JS,无框架)
-- `tests/` — pytest 测试(覆盖率目标 50-95%,当前 0%)
+- `tests/` — pytest 测试(覆盖率目标 50-95%,当前 46% 生产代码, P0/P1 测试达 96-100%)
 - `doc/` — 7 份历史优化记录(速读模式/深度学习模式/...)
 - `wenqu_data/` — 运行时 SQLite + 上传文件(**不入仓**)
 
