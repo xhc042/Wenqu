@@ -491,7 +491,22 @@ class DialogueStateMachine:
 
         # 检测是否应该结束
         # v1.3 P1-任务7: 在结束前加一道核心触达保险
-        # 若还没碰过 importance≥4 知识点,强制 PROBE 一次(只触发一次,防止无限循环)
+        # 抽到 end_of_session_check(),handle_user_input 和 record_quick_master 共用,
+        # 防止 quick_mastered 路径绕过核心触达保护。
+        async for chunk in self.end_of_session_check():
+            yield chunk
+
+    async def end_of_session_check(self) -> AsyncGenerator[str, None]:
+        """v1.3 P1-任务7: 结束前核心触达保险。
+
+        触发条件:`not is_flow_state` 且 `current_round >= min_rounds`。
+        - 若还没碰过 importance≥4 知识点,强制 PROBE 一次(只触发一次,防止无限循环)
+        - 强制 probe 后还是没碰核心 → 正常结束(避免死循环)
+        - 已碰核心 → 正常结束
+
+        handle_user_input 和 record_quick_master 都应在 _probe() 之后调用此方法,
+        保证 quick_mastered 路径不会绕过核心触达保护。
+        """
         if not self.is_flow_state and self.current_round >= self._get_min_rounds():
             if not self._has_touched_core() and not self._core_probe_attempted:
                 # 还没碰核心 → 强制 PROBE
@@ -513,6 +528,49 @@ class DialogueStateMachine:
             else:
                 async for chunk in self._end_session("达到最小时长"):
                     yield chunk
+
+    def record_quick_master(self, user_text: str) -> Optional[str]:
+        """处理"我已掌握"按钮:记录用户消息 + 标记首个 pending syllabus 为 mastered。
+
+        与 handle_user_input 的区别:跳过 LLM EVAL(用户已显式表明掌握),
+        但保留:round 计数、消息入库、心流检测、syllabus 缓存刷新。
+
+        不会自动触发 _probe()——调用方按节奏来,以便插入 TURN_DONE / PROBE 等不同 WS 消息。
+        调用方应在 _probe() 之后调用 end_of_session_check(),确保核心触达保护不被绕过。
+
+        返回被标记的 syllabus_id(供 app 层发 MASTERED_SKIPPED 事件),None 表示无 pending 可标记。
+        """
+        # 1. 轮次+1 + 消息入库 + 事件记录(与 handle_user_input 入口一致)
+        self.current_round += 1
+        self.total_rounds += 1
+        self.messages.append({"role": "user", "content": user_text})
+        db.add_message(self.session_id, "user", user_text, "USER_INPUT")
+        db.add_learning_event(self.course_id, "dialogue_round", {
+            "chapter": self.chapter_index,
+            "round": self.current_round,
+        })
+
+        # 2. 心流检测
+        self._check_flow_state(user_text)
+
+        # 3. 标记首个 pending 项为 mastered
+        chapter_pending = [
+            s for s in self.syllabus_items
+            if s["chapter_index"] == self.chapter_index
+            and s["status"] == "pending"
+        ]
+        if not chapter_pending or chapter_pending[0]["id"] in self.session_mastered_ids:
+            # 无 pending 或首条已在 session_mastered_ids,刷新缓存后返回 None
+            self.syllabus_items = db.get_syllabus_items(self.course_id)
+            return None
+
+        mastered_id = chapter_pending[0]["id"]
+        db.update_syllabus_item(mastered_id, "mastered")
+        self.session_mastered_ids.add(mastered_id)
+
+        # 4. 刷新缓存,后续 _probe() 会看到最新状态
+        self.syllabus_items = db.get_syllabus_items(self.course_id)
+        return mastered_id
 
     def _has_touched_core(self) -> bool:
         """v1.3 P1-任务7: 检查本章节是否已触达 importance ≥4 的 syllabus
