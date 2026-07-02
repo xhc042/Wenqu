@@ -769,7 +769,7 @@ async def get_course_annotations(course_id: str):
 # ==================== 日记/群聊/总结 ====================
 @app.get("/api/courses/{course_id}/diaries")
 async def get_diaries(course_id: str):
-    return await route_get_diary_entries(course_id)
+    return await api_get_diary_entries(course_id)
 
 
 @app.get("/api/courses/{course_id}/summaries")

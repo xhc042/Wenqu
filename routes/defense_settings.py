@@ -380,7 +380,7 @@ async def api_save_diary_entry(course_id: str, content: str, chapter_index: int 
 
 async def api_get_diary_entries(course_id: str):
     """获取日记条目"""
-    entries = db.get_diary_entries(course_id)
+    entries = db.get_diaries(course_id)
     return {"entries": entries}
 
 
