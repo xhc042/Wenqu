@@ -5,3 +5,18 @@ dist/
 *.spec
 wenqu_data/
 .playwright-cli/
+
+# 测试运行时产物(避免误提交)
+.coverage
+.coverage.*
+htmlcov/
+.scratch/
+
+# 历史临时脚本(以 _ 开头的工具脚本,统一 ignore 防止再堆积)
+# 真正需要的脚本请用正常命名,不要 _ 前缀
+/_*.py
+/_*.sh
+/_*.md
+
+# Windows PowerShell 误用 `> nul` 创建的零字节文件(应该是 `> $null`)
+/nul
