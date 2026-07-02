@@ -268,7 +268,7 @@ async def _run_speed_mode_postprocess(
             importance = _calc_importance(i, kp_count)
             syllabus_items.append((target_ch_idx, kp, importance))
 
-    # Step 5: fallback
+    # Step 5: fallback（无任何 key_points 时的兜底）
     if not syllabus_items and snapshots:
         for ch_idx, snap in snapshot_by_idx.items():
             goal = (snap.get("learning_goal", "") or "").strip()
@@ -276,6 +276,37 @@ async def _run_speed_mode_postprocess(
                 syllabus_items.append((ch_idx, goal, 3))
             if len(syllabus_items) >= 10:
                 break
+
+    # Step 5.5: 正文章节保底（速读精华可能遗漏正文章节）
+    # 确保重要的正文章节至少有 1 条掌握项，避免用户看到"无掌握项"以为是 bug
+    if syllabus_items and snapshot_by_idx:
+        covered_chapters = set(item[0] for item in syllabus_items)
+        fallback_count = 0
+        MAX_FALLBACK = 5  # 最多补5章，保持速读"精华"定位
+
+        # 预定义元数据章节标题关键词（这些章节可以被舍弃）
+        metadata_keywords = ["序", "前言", "附录", "推荐", "版权", "目录", "引言", "导言"]
+
+        # 按 importance 降序遍历，优先补充重要章节
+        for ch_idx, snap in sorted(snapshot_by_idx.items(),
+                                   key=lambda kv: kv[1].get("importance", 0), reverse=True):
+            if ch_idx in covered_chapters:
+                continue
+
+            # 从章节列表获取标题，判断是否为元数据
+            ch_title = ""
+            for ci, ct, _ in chapter_data:
+                if ci == ch_idx:
+                    ch_title = ct
+                    break
+
+            if any(kw in ch_title for kw in metadata_keywords):
+                continue
+
+            goal = (snap.get("learning_goal", "") or "").strip()
+            if goal and fallback_count < MAX_FALLBACK:
+                syllabus_items.append((ch_idx, goal, 3))
+                fallback_count += 1
 
     return {
         "snapshots": snapshots,
@@ -484,8 +515,34 @@ async def api_get_course(course_id: str):
         all_group_chats.extend(chats)
     all_group_chats = _utc_list(all_group_chats, "created_at")
 
+    # 速读模式：附加章节快照信息，供前端显示"精华知识点"/"推荐学习"标签
+    reading_mode = course.get("reading_mode", "standard")
+    if reading_mode == "speed":
+        try:
+            snapshots = db.get_chapter_snapshots(course_id)
+            snapshot_map = {s["chapter_index"]: s for s in snapshots}
+            highlights = db.get_global_highlights(course_id)
+            core_indices = set()
+            if highlights:
+                import re as _re
+                for s in highlights.get("core_chapter_indices", []):
+                    m = _re.search(r'第(\d+)章', str(s))
+                    if m:
+                        core_indices.add(int(m.group(1)) - 1)
+            for ch in chapters:
+                snap = snapshot_map.get(ch["idx"], {})
+                ch["importance"] = snap.get("importance", 0)
+                # keywords 已经从 db.get_chapter_snapshots 中 json.loads 过了，直接用
+                ch["keywords"] = snap.get("keywords", [])
+                ch["core_viewpoint"] = snap.get("core_viewpoint", "")
+                ch["learning_goal"] = snap.get("learning_goal", "")
+                ch["is_core"] = ch["idx"] in core_indices
+        except Exception:
+            pass
+
     return {
         "course": _utc_dict(course, "created_at"),
+        "reading_mode": reading_mode,  # 顶层暴露 reading_mode,前端判断模式直接用 data.reading_mode
         "chapters": _utc_list(chapters, "created_at"),
         "syllabus": syllabus,
         "progress": progress,
