@@ -14,10 +14,17 @@ from config import DB_PATH, AFFINITY_BASE, AFFINITY_UNLOCK_THRESHOLDS
 
 
 def get_conn() -> sqlite3.Connection:
-    """获取数据库连接（线程级）"""
-    conn = sqlite3.connect(str(DB_PATH))
+    """获取数据库连接（线程级）
+
+    v1.4 评审 🔴 #3: 加 PRAGMA busy_timeout=5000 + sqlite3.connect(timeout=10),
+    防止 WAL 多写并发争用时即时抛 `OperationalError: database is locked`。
+    - sqlite3.connect(timeout=N): DB-API 标准,connect 调用本身最多等 N 秒
+    - PRAGMA busy_timeout=5000: SQLite 内部,锁竞争时最多等 5 秒
+    """
+    conn = sqlite3.connect(str(DB_PATH), timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 

@@ -524,9 +524,8 @@ async def api_get_course(course_id: str):
             highlights = db.get_global_highlights(course_id)
             core_indices = set()
             if highlights:
-                import re as _re
                 for s in highlights.get("core_chapter_indices", []):
-                    m = _re.search(r'第(\d+)章', str(s))
+                    m = re.search(r'第(\d+)章', str(s))
                     if m:
                         core_indices.add(int(m.group(1)) - 1)
             for ch in chapters:
@@ -761,7 +760,12 @@ async def api_load_chapter_content(course_id: str, chapter_idx: int):
 
 
 def _extract_chapter_from_text(full_text: str, chapter_title: str, chapter_idx: int) -> str:
-    """从完整文本中按标题切出章节内容"""
+    """从完整文本中按标题切出章节内容
+
+    v1.4 评审 🟡 #8: 删 hard-coded `chapter_idx < 9` magic number,统一按 chunk_size 切。
+    原版对 idx>=10 章节直接返回全文,行为与算法本意(按 idx+1 等分)不一致,会在
+    长文章末段切出大块冗余内容。
+    """
     pattern = re.compile(re.escape(chapter_title), re.IGNORECASE)
     match = pattern.search(full_text)
     if match:
@@ -770,10 +774,11 @@ def _extract_chapter_from_text(full_text: str, chapter_title: str, chapter_idx: 
         next_ch = re.search(r'\n#{1,4}\s+|\n第[\d一二三四五六七八九十]+[章节]|\nChapter\s+\d+', remaining)
         end = start + len(chapter_title) + (next_ch.start() if next_ch else len(remaining))
         return full_text[start:end].strip()
+    # 标题未匹配时的兜底:按 chapter_idx 等分段落
     paragraphs = [p.strip() for p in full_text.split('\n\n') if p.strip()]
-    chunk_size = len(paragraphs) // max(1, (chapter_idx + 1))
+    chunk_size = max(1, len(paragraphs) // max(1, (chapter_idx + 1)))
     start_para = chapter_idx * chunk_size
-    end_para = start_para + chunk_size if chapter_idx < 9 else len(paragraphs)
+    end_para = start_para + chunk_size
     return '\n\n'.join(paragraphs[start_para:end_para])
 
 

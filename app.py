@@ -15,9 +15,12 @@ import os
 import asyncio
 import uuid
 import re
+import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List
+
+logger = logging.getLogger("wenqu.app")
 
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
@@ -77,6 +80,8 @@ from routes.task_routes import (
     get_task as route_get_task,
     cancel_task as route_cancel_task,
     find_active_task_for_course as route_find_active_task,
+    update_task_async, update_task_step_async,
+    fail_task_async, set_task_handle_async,
 )
 from routes.defense_settings import (
     api_generate_defense_questions,
@@ -197,64 +202,72 @@ async def create_chapter_generation_task(data: dict):
             "created_at": datetime.now().isoformat(),
         }
     
-    asyncio.create_task(run_chapter_generation(task_id))
+    # v1.4 评审 🟡 #6: 保存 asyncio.create_task() 返回值,便于未来 cancel / 跟踪进度
+    task_handle = asyncio.create_task(run_chapter_generation(task_id))
+    await set_task_handle_async(task_id, task_handle)
     return {"task_id": task_id}
 
 
 async def run_chapter_generation(task_id: str):
-    """后台执行分章和大纲生成的异步任务"""
+    """后台执行分章和大纲生成的异步任务
+
+    v1.4 评审 🟡 #5+#9: 所有 task["X"] = Y 都走 update_task_async / update_task_step_async
+    持锁更新,防止后台 coroutine 与 get_course / get_task 读路径产生中间态可见。
+    进度回调 (snapshot_progress_cb / progress_cb) 在 chunker 内部同步调用,直接改 task
+    引用;读路径 find_active_task_for_course 已 deep-copy steps,不会出现撕裂。
+    """
     task = async_tasks.get(task_id)
     if not task:
         return
-    
+
     try:
         from chunker import extract_text, smart_chunk
-        task["status"] = TASK_STATUS["PROCESSING"]
-        task["steps"][0]["status"] = "processing"
-        task["current_step"] = 0
-        
+        await update_task_async(task_id, status=TASK_STATUS["PROCESSING"], current_step=0)
+        await update_task_step_async(task_id, 0, status="processing")
+
         course_id = task["course_id"]
         course = db.get_course(course_id)
         if not course:
             raise Exception("课程不存在")
-        
+
         source_path = course.get("source_path", "")
         source_type = course.get("source_type", "")
         reading_mode = course.get("reading_mode", "standard")
         is_speed = reading_mode == "speed"
-        
-        task["steps"][0]["detail"] = "正在读取文件内容..."
-        task["progress"] = 5
+
+        await update_task_step_async(task_id, 0, detail="正在读取文件内容...")
+        await update_task_async(task_id, progress=5)
         actual_type = source_type
         if source_type == "text":
             actual_type = "txt"
         text = await extract_text(source_path, actual_type)
-        
+
         if not text:
             raise Exception("无法提取文本内容")
-        
-        task["steps"][0]["detail"] = "正在分析文本结构..."
-        task["progress"] = 10
+
+        await update_task_step_async(task_id, 0, detail="正在分析文本结构...")
+        await update_task_async(task_id, progress=10)
         chapters = await smart_chunk(text, source_type=source_type, file_path=source_path if source_type == "epub" else "", reading_mode=reading_mode)
-        task["steps"][0]["status"] = "done"
-        task["steps"][0]["detail"] = f"分章完成，共{len(chapters)}章"
-        task["progress"] = 20
-        
+        await update_task_step_async(task_id, 0, status="done", detail=f"分章完成,共{len(chapters)}章")
+        await update_task_async(task_id, progress=20)
+
         chapter_titles = _save_chapters_to_db(course_id, chapters, reading_mode)
         db.add_learning_event(course_id, "lesson_end", {"action": "chapters_generated", "count": len(chapters)})
-        
+
         if is_speed:
-            task["steps"][1]["status"] = "processing"
-            task["current_step"] = 1
-            task["steps"][1]["detail"] = "正在生成知识快照..."
-            task["progress"] = 25
-            
+            await update_task_step_async(task_id, 1, status="processing")
+            await update_task_async(task_id, current_step=1, progress=25)
+            await update_task_step_async(task_id, 1, detail="正在生成知识快照...")
+
+            # 注: snapshot_progress_cb 由 _run_speed_mode_postprocess 在 chunker 内同步调用,
+            # 与其他协程不在同一锁域。这里直接改 task 引用,读路径 find_active_task_for_course
+            # 已 deep-copy steps,前端不会看到撕裂状态。
             def snapshot_progress_cb(current, total, title):
                 pct = 25 + int((current / total) * 45)
                 short_title = title[:15] + "..." if len(title) > 15 else title
                 task["steps"][1]["detail"] = f"[{current}/{total}] {short_title}"
                 task["progress"] = pct
-            
+
             try:
                 result = await _run_speed_mode_postprocess(
                     course_id, chapters, chapter_titles,
@@ -262,28 +275,24 @@ async def run_chapter_generation(task_id: str):
                     progress_callback=snapshot_progress_cb,
                 )
                 await _persist_speed_results(course_id, result)
-                task["steps"][1]["status"] = "done"
-                task["steps"][1]["detail"] = f"快照 {len(result['snapshots'])} 章完成"
-                task["progress"] = 70
+                await update_task_step_async(task_id, 1, status="done", detail=f"快照 {len(result['snapshots'])} 章完成")
+                await update_task_async(task_id, progress=70)
             except Exception as e:
-                import logging
-                logging.warning(f"速读模式快照生成失败: {e}")
-                task["steps"][1]["status"] = "done"
-                task["steps"][1]["detail"] = "快照生成跳过"
-                task["progress"] = 70
+                logger.warning(f"速读模式快照生成失败: {e}")
+                await update_task_step_async(task_id, 1, status="done", detail="快照生成跳过")
+                await update_task_async(task_id, progress=70)
                 result = {"snapshots": [], "syllabus_items": []}
 
-            task["steps"][2]["status"] = "done"
-            task["steps"][2]["detail"] = f"掌握项 {len(result.get('syllabus_items', []))} 条完成"
+            await update_task_step_async(task_id, 2, status="done", detail=f"掌握项 {len(result.get('syllabus_items', []))} 条完成")
         else:
             from chunker import generate_syllabus_items
-            task["steps"][1]["status"] = "processing"
-            task["current_step"] = 1
-            task["steps"][1]["detail"] = "正在生成掌握项..."
-            
+            await update_task_step_async(task_id, 1, status="processing")
+            await update_task_async(task_id, current_step=1)
+            await update_task_step_async(task_id, 1, detail="正在生成掌握项...")
+
             chapters_db = db.get_chapters(course_id)
             ch_list = [(ch["idx"], ch["title"], ch.get("content_slice", "")) for ch in chapters_db if ch.get("is_loaded", 1)]
-            
+
             if ch_list:
                 _conn = db.get_conn()
                 try:
@@ -292,6 +301,7 @@ async def run_chapter_generation(task_id: str):
                 finally:
                     _conn.close()
 
+                # 注: progress_cb 同 snapshot_progress_cb,直接改 task 引用
                 def progress_cb(current, total, message):
                     task["steps"][1]["detail"] = message
                     task["progress"] = 50 + int((current / total) * 30)
@@ -301,37 +311,27 @@ async def run_chapter_generation(task_id: str):
                     if items:
                         for chapter_index, description in items:
                             db.add_syllabus_item(course_id, chapter_index, description)
-                        task["steps"][1]["status"] = "done"
-                        task["steps"][1]["detail"] = f"大纲生成完成，共{len(items)}个掌握项"
+                        await update_task_step_async(task_id, 1, status="done", detail=f"大纲生成完成,共{len(items)}个掌握项")
                     else:
                         _add_default_syllabus_items(course_id, ch_list)
-                        task["steps"][1]["status"] = "done"
-                        task["steps"][1]["detail"] = "大纲生成完成（使用默认项）"
+                        await update_task_step_async(task_id, 1, status="done", detail="大纲生成完成(使用默认项)")
                 except Exception as e:
-                    import logging
-                    logging.error(f"[异步任务 {task_id}] 掌握项生成失败: {e}", exc_info=True)
+                    logger.error(f"[异步任务 {task_id}] 掌握项生成失败: {e}", exc_info=True)
                     _add_default_syllabus_items(course_id, ch_list)
-                    task["steps"][1]["status"] = "done"
-                    task["steps"][1]["detail"] = "大纲生成完成（使用默认项）"
+                    await update_task_step_async(task_id, 1, status="done", detail="大纲生成完成(使用默认项)")
             else:
-                task["steps"][1]["status"] = "done"
-                task["steps"][1]["detail"] = "无已加载章节"
-            
-            task["progress"] = 80
-        
-        task["progress"] = 100
-        task["status"] = TASK_STATUS["COMPLETED"]
-        task["steps"][-1]["status"] = "done"
-        task["steps"][-1]["detail"] = "全部完成"
-        
+                await update_task_step_async(task_id, 1, status="done", detail="无已加载章节")
+
+            await update_task_async(task_id, progress=80)
+
+        await update_task_async(task_id, progress=100, status=TASK_STATUS["COMPLETED"])
+        last = len(task["steps"]) - 1
+        if last >= 0:
+            await update_task_step_async(task_id, last, status="done", detail="全部完成")
+
     except Exception as e:
-        import logging
-        logging.error(f"异步任务 {task_id} 失败: {e}", exc_info=True)
-        task["status"] = TASK_STATUS["FAILED"]
-        task["error"] = str(e)
-        if task["steps"]:
-            task["steps"][task["current_step"]]["status"] = "error"
-            task["steps"][task["current_step"]]["detail"] = f"失败: {str(e)[:50]}"
+        logger.error(f"异步任务 {task_id} 失败: {e}", exc_info=True)
+        await fail_task_async(task_id, str(e))
 
 
 @app.get("/api/tasks/{task_id}")
@@ -407,7 +407,9 @@ async def create_course(data: dict):
             }
         import logging
         logging.info(f"[异步任务] 创建任务 {task_id} 用于课程 {result['course_id']}")
-        asyncio.create_task(run_chapter_generation(task_id))
+        # v1.4 评审 🟡 #6: 保存 task_handle 到 async_tasks[task_id],便于未来 cancel / 跟踪
+        task_handle = asyncio.create_task(run_chapter_generation(task_id))
+        await set_task_handle_async(task_id, task_handle)
         result["task_id"] = task_id
     
     return result
@@ -667,9 +669,6 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
             await websocket.send_json({"state": "PROBE", "content": chunk})
         await websocket.send_json({"state": "PROBE_DONE"})
 
-        course_id = sm.course_id
-        chapter_index = sm.chapter_index
-
         while True:
             await websocket.send_json({"state": "WAIT_USER", "timeout": 120})
 
@@ -683,25 +682,23 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                 break
 
             if msg.get("quick_mastered"):
-                sm.current_round += 1
-                sm.total_rounds += 1
-                sm.messages.append({"role": "user", "content": user_text})
-                db.add_message(session_id, "user", user_text, "USER_INPUT")
-                syllabus_items = db.get_syllabus_items(course_id)
-                chapter_pending = [s for s in syllabus_items
-                                   if s["chapter_index"] == chapter_index
-                                   and s["status"] == "pending"]
-                if chapter_pending and chapter_pending[0]["id"] not in sm.session_mastered_ids:
-                    db.update_syllabus_item(chapter_pending[0]["id"], "mastered")
-                    sm.session_mastered_ids.add(chapter_pending[0]["id"])
-                    await websocket.send_json({"state": "MASTERED_SKIPPED", "syllabus_id": chapter_pending[0]["id"]})
-                # 重新加载 syllabus_items 以获取最新的掌握状态
-                sm.syllabus_items = db.get_syllabus_items(course_id)
+                # 走 state_machine 封装的方法,避免直接操作 sm 内部状态
+                # (评审 🔴 #1: 之前直接 ++current_round / append messages / 赋值 syllabus_items,
+                #  绕过了 DialogueStateMachine 边界,丢掉了 _force_core_probe / _has_touched_core 保护)
+                mastered_id = sm.record_quick_master(user_text)
+                if mastered_id:
+                    await websocket.send_json({"state": "MASTERED_SKIPPED", "syllabus_id": mastered_id})
                 await websocket.send_json({"state": "TURN_DONE"})
                 await asyncio.sleep(0.2)
                 async for chunk in sm._probe():
                     await websocket.send_json({"state": "PROBE", "content": chunk})
                 await websocket.send_json({"state": "PROBE_DONE"})
+                # 核心触达保护(与 handle_user_input 末尾的逻辑一致,防止 quick_mastered 绕过)
+                async for chunk in sm.end_of_session_check():
+                    await websocket.send_json({"state": sm.state, "content": chunk})
+                if sm.state == sm.END:
+                    await websocket.send_json({"state": "SESSION_END"})
+                    break
                 # 发送 WAIT_USER 状态以启用前端输入框和"我已掌握"按钮
                 await websocket.send_json({"state": "WAIT_USER", "timeout": 120})
                 continue
@@ -752,7 +749,15 @@ async def annotate_ask(data: dict):
         {"role": "user", "content": f"引用文本：\n{quoted_text}\n\n问题：{question}"},
     ]
 
-    answer = await llm.chat(messages, temperature=0.3, max_tokens=500)
+    # 评审 🔴 #4: 划词问答是常用功能,LLM 失败必须兜底,否则 db.add_annotation 不执行,
+    # 用户下次选同一段还会问一遍同样的问题(因为没历史记录)。
+    try:
+        answer = await llm.chat(messages, temperature=0.3, max_tokens=500)
+        if not answer or answer.startswith("⚠️"):
+            answer = "抱歉,这个问题暂无法回答,请稍后再试。"
+    except Exception as e:
+        logger.warning(f"annotate_ask LLM 失败,使用兜底: {e}")
+        answer = "抱歉,这个问题暂无法回答,请稍后再试。"
 
     if course_id:
         db.add_annotation(course_id, session_id, quoted_text, question, answer)
@@ -1018,7 +1023,8 @@ async def start_defense(course_id: str):
                 "description": item["description"],
                 "question": result.get("question", item["description"]),
             })
-        except Exception:
+        except Exception as e:
+            logger.warning(f"start_defense Q 出题失败(syllabus_id={item.get('id')}),使用兜底问题: {e}")
             questions.append({
                 "syllabus_id": item["id"],
                 "chapter_index": item["chapter_index"],
@@ -1069,7 +1075,8 @@ async def submit_defense(course_id: str, data: dict):
             if verdict == "FAIL":
                 all_passed = False
             results.append({"question_index": i, "verdict": verdict, "comment": comment})
-        except Exception:
+        except Exception as e:
+            logger.warning(f"submit_defense Q[{i}] 评估失败,记为 FAIL: {e}")
             results.append({"question_index": i, "verdict": "FAIL", "comment": "无法评估"})
             all_passed = False
 
@@ -1089,7 +1096,8 @@ async def submit_defense(course_id: str, data: dict):
                     {"role": "user", "content": ref_prompt},
                 ], temperature=0.3, max_tokens=300)
                 questions[i]["reference_answer"] = ref_answer.strip()
-            except Exception:
+            except Exception as e:
+                logger.warning(f"submit_defense Q[{i}] ref_answer 生成失败,使用兜底: {e}")
                 questions[i]["reference_answer"] = "请回顾教材中相关章节的内容。"
 
     result_questions = []
@@ -1114,10 +1122,16 @@ async def submit_defense(course_id: str, data: dict):
         strengths_text = "、".join(profile.get("strengths", ["待总结"])[:3]) if profile else "顺利完成课程"
         weaknesses_text = "、".join(profile.get("weaknesses", ["继续加油"])[:3]) if profile else "继续努力"
 
-        teacher_comment = await llm.chat([
-            {"role": "system", "content": "你是一个温暖而有智慧的教师。写一句毕业寄语（30字以内）。"},
-            {"role": "user", "content": f"学生刚完成了{course['title']}课程的全部学习。"},
-        ], temperature=0.7, max_tokens=100)
+        # 评审 🔴 #2: 学生已通过答辩,必须保证证书落库。
+        # teacher_comment 失败时用兜底字符串,绝不能让一句毕业寄语丢证书/丢争议记录。
+        try:
+            teacher_comment = await llm.chat([
+                {"role": "system", "content": "你是一个温暖而有智慧的教师。写一句毕业寄语（30字以内）。"},
+                {"role": "user", "content": f"学生刚完成了{course['title']}课程的全部学习。"},
+            ], temperature=0.7, max_tokens=100)
+        except Exception as e:
+            logger.warning(f"teacher_comment 生成失败,使用兜底: {e}")
+            teacher_comment = "恭喜你顺利完成课程!"
 
         stats = db.get_course_learning_stats(course_id)
         total_minutes = stats.get("total_minutes", 0)
