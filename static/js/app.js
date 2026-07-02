@@ -1000,7 +1000,36 @@ function renderCourseUI(course, data) {
     document.getElementById('course-header').innerHTML = `
         <div class="course-detail-header">
             <div>
-                <div class="course-title">${course.title}</div>
+                <div class="course-title">
+                    ${course.title}
+                    ${(() => {
+                        // 课程模式徽章: speed=速读 / standard=标准 / deep=研读
+                        const modeMap = {
+                            'speed':    { icon: '⚡', label: '速读', bg: 'rgba(255,193,7,0.18)',  fg: '#b8860b', border: 'rgba(255,193,7,0.45)' },
+                            'standard': { icon: '📖', label: '标准', bg: 'rgba(108,92,231,0.12)', fg: 'var(--accent)', border: 'rgba(108,92,231,0.35)' },
+                            'deep':     { icon: '🧠', label: '研读', bg: 'rgba(108,117,125,0.15)', fg: '#495057', border: 'rgba(108,117,125,0.4)' },
+                        };
+                        const m = modeMap[course.reading_mode] || modeMap['standard'];
+                        const tooltip = ({
+                            'speed':    '速读模式：精选 20% 核心知识点,快速建立全局认知',
+                            'standard': '标准模式：覆盖全书知识点,深入理解核心内容',
+                            'deep':     '研读模式：精读章节+思辨笔记,深度思考与批判性阅读',
+                        })[course.reading_mode] || '';
+                        return `<span style="
+                            display:inline-block;
+                            margin-left:10px;
+                            padding:3px 10px;
+                            font-size:12px;
+                            font-weight:500;
+                            background:${m.bg};
+                            color:${m.fg};
+                            border:1px solid ${m.border};
+                            border-radius:12px;
+                            vertical-align:middle;
+                            cursor:help;
+                        " title="${tooltip}">${m.icon} ${m.label}</span>`;
+                    })()}
+                </div>
                 <div class="course-source">${course.source_type} · ${new Date(course.created_at).toLocaleDateString()}
                     · <span style="color:var(--accent);font-weight:500">已学习 ${sessionCount} 次</span>
                 </div>
@@ -1036,6 +1065,15 @@ function renderCourseUI(course, data) {
             </div>
         </div>
     `;
+
+    // 速读模式提示条
+    if (data.reading_mode === 'speed') {
+        document.getElementById('course-progress').innerHTML += `
+            <div style="margin-top:12px;padding:10px 14px;background:rgba(255,193,7,0.08);border:1px solid rgba(255,193,7,0.2);border-radius:8px;font-size:13px;color:var(--text-secondary);line-height:1.5">
+                ⚡ <strong>速读模式</strong>：系统从全书中精选了最重要的知识点为你优先学习（约20%），部分章节暂未生成掌握项，点击即可学习全部内容。
+            </div>
+        `;
+    }
     
     // 结业答辩按钮
     const defenseBanner = document.getElementById('defense-banner');
@@ -1149,6 +1187,11 @@ function renderChapters(chapters, syllabus, chapterSessionCounts = {}, readingMo
                 if (ch.is_core) coreTags.push('<span class="tag tag-core" style="font-size:11px;background:rgba(255,107,107,0.15);color:#ff6b6b;border:none">⭐ 核心</span>');
                 if (ch.importance && ch.importance > 0.7) coreTags.push('<span class="tag" style="font-size:11px;background:rgba(255,193,7,0.15);color:#ffc107;border:none">🔥 重要</span>');
                 
+                // 速读模式：有掌握项的章节标注"精华知识点"
+                if (chapterSyllabus.length > 0) {
+                    coreTags.push('<span style="font-size:11px;padding:2px 8px;background:rgba(108,92,231,0.1);color:var(--accent);border-radius:10px">📋 精华知识点</span>');
+                }
+                
                 const snapshotInfo = [];
                 if (ch.learning_goal) snapshotInfo.push(`<span style="font-size:12px;color:#636e72">🎯 ${escapeHtml(ch.learning_goal)}</span>`);
                 if (ch.core_viewpoint) snapshotInfo.push(`<span style="font-size:12px;color:#636e72">💡 ${escapeHtml(ch.core_viewpoint)}</span>`);
@@ -1165,12 +1208,16 @@ function renderChapters(chapters, syllabus, chapterSessionCounts = {}, readingMo
                         (isMastered ? '' : `<button class="btn btn-xs" style="font-size:9px;padding:0 3px;margin-left:1px;vertical-align:middle;border:none;background:var(--success);color:#fff;border-radius:3px;cursor:pointer" onclick="event.stopPropagation();markSyllabusMastered(${s.id}, this)" title="标记为已掌握">✓</button>`);
                 }).join('') : '';
 
+                // 速读模式：无掌握项的章节显示"推荐学习"提示
+                const recommendedTag = chapterSyllabus.length === 0 ? '<span style="font-size:11px;padding:2px 8px;background:rgba(40,167,69,0.1);color:#28a745;border-radius:10px;margin-left:4px">📌 推荐学习</span>' : '';
+
                 div.innerHTML = `
                     <div class="chapter-index">${levelIcon}</div>
                     <div class="chapter-info">
                         <div class="chapter-title" style="font-weight:${depth <= 1 ? '600' : '400'}">
                             ${ch.title}
                             ${coreTags.join('')}
+                            ${recommendedTag}
                         </div>
                         ${snapshotInfo.length > 0 ? `<div style="margin-top:4px">${snapshotInfo.join('<br>')}</div>` : ''}
                         ${keywordsHtml}
