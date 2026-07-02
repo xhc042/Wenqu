@@ -23,6 +23,31 @@ def _temp_db(monkeypatch, tmp_path):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _reset_llm_config():
+    """每个测试前重置 config.LLM_CONFIG,防止 test 间 config 污染。
+
+    背景:`test_llm_client_with_config` 会调 `sync_db_to_config()` 写入
+    `LLM_CONFIG["api_key"]="test-key"`,这个 dict 是模块级全局状态,
+    后续 test 调 `LLMClient(tier="balanced")` → `get_model_tier_config` →
+    `get_llm_config` → `dict(LLM_CONFIG)`,会拿到上一个 test 残留的 api_key,
+    导致 `test_llm_client_without_config` / `test_llm_client_stream_without_config`
+    绕过"未配置"检查,真去调 LLM API,再断言 fail。
+
+    修复:测试前清空 LLM_CONFIG 的运行时字段,测试后恢复原始值(防污染下一个 test)。
+    """
+    from config import LLM_CONFIG
+    original = dict(LLM_CONFIG)
+    # 强制重置三个运行时字段(api_key / base_url / model)
+    LLM_CONFIG["api_key"] = ""
+    LLM_CONFIG["base_url"] = ""
+    LLM_CONFIG["model"] = ""
+    yield
+    # 恢复原始值(可能本来就是空)
+    LLM_CONFIG.clear()
+    LLM_CONFIG.update(original)
+
+
 @pytest.fixture
 def temp_upload_dir(monkeypatch, tmp_path):
     """为需要 UPLOAD_DIR 的测试提供临时上传目录."""
