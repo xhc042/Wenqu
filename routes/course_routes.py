@@ -35,6 +35,16 @@ from llm_client import llm
 logger = logging.getLogger(__name__)
 
 
+# v1.5 优化: 预编译正则，避免每次调用重复编译
+_CHAPTER_NUM_RE = re.compile(r'第(\d+)章')
+
+
+def _parse_chapter_num(s: str) -> int:
+    """从"第N章"格式解析章节号（0-based）"""
+    m = _CHAPTER_NUM_RE.search(str(s))
+    return int(m.group(1)) - 1 if m else -1
+
+
 def _utc(dt):
     if not dt or not isinstance(dt, str) or not dt.strip():
         return dt
@@ -525,9 +535,9 @@ async def api_get_course(course_id: str):
             core_indices = set()
             if highlights:
                 for s in highlights.get("core_chapter_indices", []):
-                    m = re.search(r'第(\d+)章', str(s))
-                    if m:
-                        core_indices.add(int(m.group(1)) - 1)
+                    idx = _parse_chapter_num(s)
+                    if idx >= 0:
+                        core_indices.add(idx)
             for ch in chapters:
                 snap = snapshot_map.get(ch["idx"], {})
                 ch["importance"] = snap.get("importance", 0)
@@ -594,9 +604,9 @@ async def api_generate_chapters(course_id: str, reading_mode: str = "standard"):
             highlights = db.get_global_highlights(course_id)
             if highlights:
                 for s in highlights.get("core_chapter_indices", []):
-                    m = re.search(r'第(\d+)章', str(s))
-                    if m:
-                        core_indices.add(int(m.group(1)) - 1)
+                    idx = _parse_chapter_num(s)
+                    if idx >= 0:
+                        core_indices.add(idx)
         except Exception:
             pass
 
@@ -615,9 +625,9 @@ async def api_generate_chapters(course_id: str, reading_mode: str = "standard"):
             new_core_indices = set()
             if isinstance(highlights, dict):
                 for s in highlights.get("core_chapter_indices", []):
-                    m = re.search(r'第(\d+)章', str(s))
-                    if m:
-                        new_core_indices.add(int(m.group(1)) - 1)
+                    idx = _parse_chapter_num(s)
+                    if idx >= 0:
+                        new_core_indices.add(idx)
             if new_core_indices:
                 core_indices = new_core_indices
 
@@ -1064,10 +1074,6 @@ async def api_get_course_overview(course_id: str):
     chapters = db.get_chapters(course_id)
     reading_mode = course.get("reading_mode", "standard")
 
-    def parse_chapter_num(s: str) -> int:
-        m = re.search(r'第(\d+)章', s)
-        return int(m.group(1)) - 1 if m else -1
-
     if reading_mode == "speed":
         snapshots = db.get_chapter_snapshots(course_id)
         highlights = db.get_global_highlights(course_id) or {}
@@ -1075,7 +1081,7 @@ async def api_get_course_overview(course_id: str):
         core_indices = set()
         if highlights:
             for s in highlights.get("core_chapter_indices", []):
-                idx = parse_chapter_num(s)
+                idx = _parse_chapter_num(s)
                 if idx >= 0:
                     core_indices.add(idx)
 
@@ -1100,17 +1106,17 @@ async def api_get_course_overview(course_id: str):
         chapter_dependencies = {}
         if highlights:
             for ch_key, deps in highlights.get("chapter_dependencies", {}).items():
-                ch_idx = parse_chapter_num(ch_key)
+                ch_idx = _parse_chapter_num(ch_key)
                 if ch_idx < 0:
                     continue
                 if isinstance(deps, str):
-                    dep_idx = parse_chapter_num(deps)
+                    dep_idx = _parse_chapter_num(deps)
                     if dep_idx >= 0:
                         chapter_dependencies[ch_idx] = [dep_idx]
                 elif isinstance(deps, list):
                     dep_indices = []
                     for d in deps:
-                        di = parse_chapter_num(d)
+                        di = _parse_chapter_num(d)
                         if di >= 0:
                             dep_indices.append(di)
                     if dep_indices:

@@ -6,12 +6,54 @@
 
 import json
 import asyncio
+import hashlib
 from typing import AsyncGenerator, Optional, List, Dict, Any
+from collections import OrderedDict
 
 import httpx
 
 from config import get_llm_config, get_model_tier_config, DEPTH_CONFIG
 import database as db
+
+
+# v1.5 优化: LLM 响应缓存，避免重复调用相同内容的 LLM
+# 使用 OrderedDict 实现 LRU 淘汰
+class _LRUCache(OrderedDict):
+    """简单的 LRU 缓存，限制最大条目数"""
+    def __init__(self, maxsize=64):
+        super().__init__()
+        self._maxsize = maxsize
+
+    def __getitem__(self, key):
+        val = super().__getitem__(key)
+        self.move_to_end(key)  # 标记为最近使用
+        return val
+
+    def __setitem__(self, key, value):
+        if key in self:
+            self.move_to_end(key)
+        else:
+            if len(self) >= self._maxsize:
+                self.popitem(last=False)  # 淘汰最久未使用的
+        super().__setitem__(key, value)
+
+
+# 非流式响应缓存: 最大 64 条
+_RESPONSE_CACHE = _LRUCache(maxsize=64)
+_CACHE_HIT_COUNT = 0
+_CACHE_MISS_COUNT = 0
+
+
+def _make_cache_key(messages: List[dict], temperature: float, max_tokens: int) -> str:
+    """生成缓存键"""
+    # 只取 messages 的 role+content 和参数，忽略其他
+    canonical = {
+        "messages": [{"role": m.get("role"), "content": m.get("content", "")} for m in messages],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    raw = json.dumps(canonical, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
 def _try_load_active_model_from_db(client):
@@ -147,7 +189,18 @@ class LLMClient:
         max_tokens: int = 2048,
         response_format: Optional[dict] = None,
     ) -> str:
-        """非流式对话，返回完整响应"""
+        """非流式对话，返回完整响应
+
+        v1.5 优化: 加入 LRU 缓存，相同 messages+params 组合直接返回缓存结果
+        """
+        # v1.5: 检查缓存
+        cache_key = _make_cache_key(messages, temperature, max_tokens)
+        cached = _RESPONSE_CACHE.get(cache_key)
+        if cached is not None:
+            global _CACHE_HIT_COUNT
+            _CACHE_HIT_COUNT += 1
+            return cached
+
         # 懒加载：如果还没有配置，尝试从数据库读取激活模型
         if not self._api_key and not self._base_url and not self._model:
             _try_load_active_model_from_db(self)
@@ -174,7 +227,10 @@ class LLMClient:
                 if resp.status_code != 200:
                     return "⚠️ API错误"
                 data = resp.json()
-                return data["choices"][0]["message"]["content"]
+                result = data["choices"][0]["message"]["content"]
+                # v1.5: 写入缓存
+                _RESPONSE_CACHE[cache_key] = result
+                return result
             except Exception:
                 return "⚠️ 网络好像有点问题"
 
@@ -195,8 +251,8 @@ class LLMClient:
         )
         if not text or text.startswith("⚠️"):
             return {"status": "thinking", "items": []}
-        
-        # v1.20: 清理思考标签（兼容 o1/Claude 等模型的思考模式）
+
+        # v1.5: 使用预编译正则清理思考标签（复用 state_machine 的模式定义）
         import re as _re
         text = _re.sub(r'<think>[\s\S]*?</think>', '', text, flags=_re.IGNORECASE)
         text = _re.sub(r'<thinking>[\s\S]*?</thinking>', '', text, flags=_re.IGNORECASE)

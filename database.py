@@ -20,12 +20,15 @@ def get_conn() -> sqlite3.Connection:
     防止 WAL 多写并发争用时即时抛 `OperationalError: database is locked`。
     - sqlite3.connect(timeout=N): DB-API 标准,connect 调用本身最多等 N 秒
     - PRAGMA busy_timeout=5000: SQLite 内部,锁竞争时最多等 5 秒
+    v1.5 优化: 增加 PRAGMA cache_size(-64000) 缓存 64MB, synchronous=NORMAL 提升写入速度
     """
     conn = sqlite3.connect(str(DB_PATH), timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA cache_size=-64000")   # 64MB 页面缓存
+    conn.execute("PRAGMA synchronous=NORMAL")   # 平衡安全性和写入性能
     return conn
 
 

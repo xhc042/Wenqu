@@ -773,11 +773,6 @@ body {
     border-left-color: var(--success);
 }
 
-@keyframes slideUp {
-    from { opacity: 0; transform: translateY(20px); }
-    to { opacity: 1; transform: translateY(0); }
-}
-
 /* ==================== 侧边划词抽屉 ==================== */
 .annotation-drawer {
     position: fixed;
@@ -988,6 +983,11 @@ body {
 @keyframes slideUp {
     from { opacity: 0; transform: translateY(20px); }
     to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.1); opacity: 0.8; }
 }
 
 /* ==================== 风格滑块 ==================== */

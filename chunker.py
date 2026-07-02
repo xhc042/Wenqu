@@ -18,6 +18,47 @@ import aiofiles
 
 from llm_client import llm, multi_llm
 
+# ==================== EPUB TOC 缓存 ====================
+
+# TOC 缓存: {file_path: {"toc": [...], "href_map": {...}, "mtime": float, "size": int}}
+_toc_cache: Dict[str, Any] = {}
+_CACHE_HIT_COUNT = 0
+_CACHE_MISS_COUNT = 0
+
+
+def _get_toc_cache(file_path: str) -> Optional[Dict]:
+    """获取 TOC 缓存，命中则返回缓存数据"""
+    global _CACHE_HIT_COUNT, _CACHE_MISS_COUNT
+    try:
+        stat = os.stat(file_path)
+    except (OSError, ImportError):
+        return None
+    cached = _toc_cache.get(file_path)
+    if cached and cached.get("mtime") == stat.st_mtime and cached.get("size") == stat.st_size:
+        _CACHE_HIT_COUNT += 1
+        return cached
+    _CACHE_MISS_COUNT += 1
+    return None
+
+
+def _set_toc_cache(file_path: str, toc: list, href_map: dict):
+    """设置 TOC 缓存"""
+    try:
+        import os as _os
+        stat = _os.stat(file_path)
+    except (OSError, ImportError):
+        return
+    # 缓存清理：条目超过 200 时清空
+    if len(_toc_cache) > 200:
+        _toc_cache.clear()
+    _toc_cache[file_path] = {
+        "toc": toc,
+        "href_map": href_map,
+        "mtime": stat.st_mtime,
+        "size": stat.st_size,
+    }
+
+
 # ==================== EPUB TOC 提取 ====================
 
 async def extract_toc_from_epub(file_path: str) -> tuple:
@@ -28,8 +69,15 @@ async def extract_toc_from_epub(file_path: str) -> tuple:
     toc_items: [{"idx": 0, "title": "第一章", "href": "chap1.xhtml",
                   "children": [{"idx": 1, "title": "1.1", "href": ...}, ...]}, ...]
     href_content_map: {"chap1.xhtml": "纯文本正文..."}
+
+    v1.5 优化: 加入 TOC 缓存，相同文件多次打开时跳过解析开销
     """
     from xml.etree import ElementTree as ET
+
+    # v1.5: 检查缓存
+    cached = _get_toc_cache(file_path)
+    if cached:
+        return cached["toc"], cached["href_map"]
 
     try:
         with zipfile.ZipFile(file_path, 'r') as z:
@@ -61,6 +109,9 @@ async def extract_toc_from_epub(file_path: str) -> tuple:
             #    需要解析为相对于 nav 文件或 opf 目录的完整路径
             if toc_items and href_content_map:
                 toc_items = _resolve_toc_hrefs(toc_items, manifest)
+
+            # v1.5: 写入缓存
+            _set_toc_cache(file_path, toc_items, href_content_map)
 
             return toc_items, href_content_map
     except Exception as e:

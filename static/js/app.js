@@ -238,6 +238,20 @@ function hideProgressOverlay() {
     }
 }
 
+// ==================== 工具函数 ====================
+
+/**
+ * v1.5 优化: 防抖函数 - 延迟执行，如果在延迟期内再次调用则重新开始计时
+ * 用于搜索框、窗口resize等高频事件
+ */
+function debounce(fn, delay = 300) {
+    let timer = null;
+    return function (...args) {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => { fn.apply(this, args); timer = null; }, delay);
+    };
+}
+
 // ==================== 异步任务轮询 ====================
 let currentTaskPollingInterval = null;
 let currentTaskId = null;
@@ -450,12 +464,16 @@ function renderHeatmap(data, year) {
 
     // 计算周偏移
     const dayOfWeek = start.getDay();
+
+    // v1.5 优化: 使用 DocumentFragment 批量插入，减少重排
+    const fragment = document.createDocumentFragment();
+
     // 填充空白（第一天之前的空单元格）
     for (let i = 0; i < dayOfWeek; i++) {
         const cell = document.createElement('div');
         cell.className = 'heatmap-cell level-0';
         cell.style.background = 'transparent';
-        grid.appendChild(cell);
+        fragment.appendChild(cell);
     }
 
     // 遍历每一天
@@ -469,10 +487,12 @@ function renderHeatmap(data, year) {
         cell.className = `heatmap-cell level-${level}`;
         cell.title = `${dateStr}: ${count} 次学习活动`;
         cell.onclick = () => loadDailySummary(dateStr);
-        grid.appendChild(cell);
+        fragment.appendChild(cell);
 
         current.setDate(current.getDate() + 1);
     }
+
+    grid.appendChild(fragment);
 
     // 图例
     legend.innerHTML = `Less <span class="legend-cell" style="background:#ebedf0"></span>

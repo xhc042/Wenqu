@@ -15,23 +15,25 @@ from llm_client import llm, build_system_prompt
 from config import FLOW_DETECTION, DEPTH_CONFIG, READING_MODE_TO_DEPTH
 import database as db
 
+# v1.5 优化: 预编译正则表达式，避免每次调用 strip_thinking_tags 时重复编译
+_THINKING_TAG_PATTERN = re.compile(r'<think>[\s\S]*?</think>', re.IGNORECASE)
+_STANDARD_THINKING_PATTERN = re.compile(r'<thinking>[\s\S]*?</thinking>', re.IGNORECASE)
+_NEWLINE_PATTERN = re.compile(r'\n{3,}')
+
 
 def strip_thinking_tags(content: str) -> str:
     """移除思考标签，兼容带思考模式的模型（如o1、Claude等）
 
-    处理以下格式：
-    - <think> 内容</think>
-    - <thinking> 内容 </thinking>
-    - 等等...
+    v1.5 优化: 使用预编译的正则表达式，减少重复编译开销
     """
     if not content:
         return content
     # 移除 <think>...</think> 标签及其内容
-    content = re.sub(r'<think>[\s\S]*?</think>', '', content, flags=re.IGNORECASE)
+    content = _THINKING_TAG_PATTERN.sub('', content)
     # 移除 <thinking>...</thinking> 标签及其内容
-    content = re.sub(r'<thinking>[\s\S]*?</thinking>', '', content, flags=re.IGNORECASE)
+    content = _STANDARD_THINKING_PATTERN.sub('', content)
     # 清理多余空白
-    content = re.sub(r'\n{3,}', '\n\n', content)
+    content = _NEWLINE_PATTERN.sub('\n\n', content)
     return content.strip()
 
 

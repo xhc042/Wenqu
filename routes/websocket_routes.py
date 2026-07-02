@@ -24,15 +24,18 @@ from llm_client import llm
 
 logger = logging.getLogger(__name__)
 
-# 思考标签正则
-THINK_PATTERN = re.compile(r"<think>.*?</think>", re.DOTALL)
+# v1.5 优化: 预编译思考标签正则
+_THINK_PATTERN = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
 def clean_thinking_tags(text: str) -> str:
-    """移除 AI 回复中的思考标签"""
+    """移除 AI 回复中的思考标签
+
+    v1.5 优化: 使用预编译正则，减少重复编译开销
+    """
     if not text:
         return text
-    cleaned = THINK_PATTERN.sub("", text).strip()
+    cleaned = _THINK_PATTERN.sub("", text).strip()
     return cleaned
 
 
