@@ -728,20 +728,24 @@ async def api_load_chapter_content(course_id: str, chapter_idx: int):
     finally:
         conn.close()
 
-    items = await generate_syllabus_items(course_id, [(chapter_idx, chapter["title"], full_content)])
-    if items:
-        # 清掉该章节的旧 syllabus，避免反复加载累积导致 ch_idx 重复
-        conn = db.get_conn()
-        try:
-            conn.execute(
-                "DELETE FROM syllabus_items WHERE course_id=? AND chapter_index=?",
-                (course_id, chapter_idx),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-    for ch_idx, desc in items:
-        db.add_syllabus_item(course_id, ch_idx, desc)
+    items = []
+    # 速读模式:不重新生成 syllabus(由 _run_speed_mode_postprocess 集中按精华 20% 选取
+    # 写入数据库,加载时再生成会破坏"只有核心章节有掌握项"的设计,导致 syllabus 持续累积)
+    if course.get("reading_mode") != "speed":
+        items = await generate_syllabus_items(course_id, [(chapter_idx, chapter["title"], full_content)])
+        if items:
+            # 清掉该章节的旧 syllabus，避免反复加载累积导致 ch_idx 重复
+            conn = db.get_conn()
+            try:
+                conn.execute(
+                    "DELETE FROM syllabus_items WHERE course_id=? AND chapter_index=?",
+                    (course_id, chapter_idx),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        for ch_idx, desc in items:
+            db.add_syllabus_item(course_id, ch_idx, desc)
 
     return {
         "status": "loaded",

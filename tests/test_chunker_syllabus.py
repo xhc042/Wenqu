@@ -289,6 +289,96 @@ async def test_api_load_chapter_content_does_not_touch_other_chapters():
     assert by_ch.get(10, []) == ["ch10 新 syllabus"]
 
 
+@pytest.mark.asyncio
+async def test_api_load_chapter_content_speed_mode_does_not_generate_syllabus():
+    """速读模式:加载章节不应调用 generate_syllabus_items,避免破坏
+    '_run_speed_mode_postprocess 集中按精华 20% 选取' 的设计,导致 syllabus 持续累积。
+
+    复现:速读模式分章后,核心 5 章有 syllabus。用户点'推荐学习'章节(无 syllabus)
+    → 触发 api_load_chapter_content → 不应再为该章节生成新 syllabus
+    """
+    import database as db
+    db.init_db()
+    from routes.course_routes import api_load_chapter_content
+
+    # 速读模式分章完成
+    course_id = db.create_course("速读测试课", "text", "", "speed")
+
+    # 核心 5 章(由 _run_speed_mode_postprocess 集中生成 syllabus)
+    for idx in range(5):
+        db.add_chapter(
+            course_id=course_id, idx=idx, title=f"核心章节{idx}",
+            content_slice="...", summary="",
+            content_full=f"核心章节{idx}全文", is_loaded=0,
+        )
+        db.add_syllabus_item(course_id, idx, f"核心{idx}的精华")
+
+    # "推荐学习"章节(无 syllabus,但要能加载正文)
+    db.add_chapter(
+        course_id=course_id, idx=10, title="非核心章节",
+        content_slice="...", summary="",
+        content_full="非核心章节全文", is_loaded=0,
+    )
+
+    # 关键断言 1:加载前,ch=10 没有 syllabus(推荐学习状态)
+    items_before = db.get_syllabus_items(course_id)
+    chapters_with_syllabus_before = {it["chapter_index"] for it in items_before}
+    assert 10 not in chapters_with_syllabus_before, \
+        "测试前置条件:ch=10 速读模式下不应该有 syllabus"
+    assert len(items_before) == 5, f"速读初始化应有 5 条核心 syllabus,实际 {len(items_before)}"
+
+    # mock LLM,如果被调用就报错
+    async def should_not_be_called(messages, *args, **kwargs):
+        raise AssertionError("速读模式下不应调用 LLM 生成 syllabus!")
+
+    with patch("chunker.llm") as mock_llm:
+        mock_llm.chat_json = AsyncMock(side_effect=should_not_be_called)
+        result = await api_load_chapter_content(course_id, 10)
+
+    # 关键断言 2:加载后,ch=10 仍然没有 syllabus(没被偷塞)
+    items_after = db.get_syllabus_items(course_id)
+    chapters_with_syllabus_after = {it["chapter_index"] for it in items_after}
+    assert 10 not in chapters_with_syllabus_after, \
+        f"速读模式加载章节后,ch=10 不应被自动加 syllabus,实际章节: {chapters_with_syllabus_after}"
+    # 总数仍是 5(没膨胀)
+    assert len(items_after) == 5, \
+        f"速读模式加载章节不应增加 syllabus,实际从 5 变成 {len(items_after)}"
+    # 关键断言 3:加载仍然成功(返回 loaded 状态,is_loaded=1)
+    assert result["status"] == "loaded", f"应返回 loaded 状态,实际 {result['status']}"
+    assert result["chapter"]["is_loaded"] == 1
+    # 关键断言 4:LLM 确实没被调用
+    mock_llm.chat_json.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_api_load_chapter_content_standard_mode_still_generates_syllabus():
+    """回归保护:标准模式加载章节仍应正常生成 syllabus(防止误改影响标准模式)"""
+    import database as db
+    db.init_db()
+    from routes.course_routes import api_load_chapter_content
+
+    course_id = db.create_course("标准测试课", "text", "", "standard")
+    db.add_chapter(
+        course_id=course_id, idx=10, title="第十章",
+        content_slice="...", summary="",
+        content_full="第十章全文", is_loaded=0,
+    )
+
+    async def fake_chat_json(messages, *args, **kwargs):
+        return {"items": [
+            {"chapter": 1, "description": "标准A"},
+            {"chapter": 1, "description": "标准B"},
+        ]}
+
+    with patch("chunker.llm") as mock_llm:
+        mock_llm.chat_json = AsyncMock(side_effect=fake_chat_json)
+        await api_load_chapter_content(course_id, 10)
+
+    items = db.get_syllabus_items(course_id)
+    assert len(items) == 2
+    assert {it["chapter_index"] for it in items} == {10}
+
+
 # ==================== _add_default_syllabus_items 测试 ====================
 
 @pytest.mark.asyncio
