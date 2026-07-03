@@ -1793,3 +1793,25 @@ body {
 }
 
 
+
+
+/* ==================== Markdown 内容渲染 ==================== */
+.md-content h1, .md-content h2, .md-content h3 {
+    color: var(--text-primary);
+    margin: 12px 0 6px;
+}
+.md-content h1 { font-size: 16px; }
+.md-content h2 { font-size: 14px; }
+.md-content h3 { font-size: 13px; font-weight: 600; }
+.md-content p { margin: 6px 0; line-height: 1.6; }
+.md-content ul, .md-content ol { padding-left: 18px; margin: 6px 0; }
+.md-content li { margin: 3px 0; line-height: 1.5; }
+.md-content code {
+    background: rgba(108,92,231,0.08);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 12px;
+    color: var(--accent);
+}
+.md-content strong { font-weight: 600; color: var(--text-primary); }
+.md-content em { font-style: italic; color: var(--text-secondary); }

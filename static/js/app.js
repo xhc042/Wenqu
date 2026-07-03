@@ -2596,7 +2596,7 @@ function renderPostClass(data) {
                     <div style="font-size:13px;font-weight:500">📋 复习总结</div>
                     <div style="font-size:11px;color:#b2bec3;white-space:nowrap">${fmtTime(s.created_at)}</div>
                 </div>
-                <div style="font-size:13px;white-space:pre-wrap">${escapeHtml(s.content)}</div>
+                <div style="font-size:13px" class="md-content">${marked.parse(s.content || '')}</div>
             </div>`
         ).join('');
     } else {

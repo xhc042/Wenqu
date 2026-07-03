@@ -1200,7 +1200,7 @@ async def api_get_course_overview(course_id: str):
         if total_points == 0:
             recommendation = "正在生成知识快照，请稍候..."
         elif next_ch:
-            recommendation = f"建议先学核心章节，下一站：第{next_ch['idx']+1}章「{next_ch['title']}」"
+            recommendation = f"建议先学核心章节，下一站：「{next_ch['title']}」"
         else:
             recommendation = f"核心章节已学完！共掌握{core_learned}/{core_total}个核心章节（{core_percent}%）"
 
@@ -1262,9 +1262,9 @@ async def api_get_course_overview(course_id: str):
             recommendation = "正在生成分章，请稍候..."
         elif next_chapter:
             if percent < 30:
-                recommendation = f"建议从第{next_chapter['idx'] + 1}章「{next_chapter['title']}」开始学习"
+                recommendation = f"建议从「{next_chapter['title']}」开始学习"
             elif percent < 50:
-                recommendation = f"继续学习第{next_chapter['idx'] + 1}章「{next_chapter['title']}」，完成更多掌握项"
+                recommendation = f"继续学习「{next_chapter['title']}」，完成更多掌握项"
             elif percent < 100:
                 recommendation = f"还剩{len(pending)}个知识点未完成，继续加油！"
             else:

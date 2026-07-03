@@ -344,6 +344,11 @@ async def run_chapter_generation(task_id: str):
         if last >= 0:
             await update_task_step_async(task_id, last, status="done", detail="全部完成")
 
+        # 估算并记录书籍导入阶段消耗的 token
+        n_chapters = len(chapters)
+        import_tokens_est = n_chapters * 600 + 3700  # 快照生成 + highlights/syllabus/summary
+        db.update_course_import_tokens(course_id, import_tokens_est)
+
     except Exception as e:
         logger.error(f"异步任务 {task_id} 失败: {e}", exc_info=True)
         await fail_task_async(task_id, str(e))
@@ -825,6 +830,7 @@ async def get_defense_records(course_id: str):
 @app.get("/api/courses/{course_id}/history")
 async def get_course_history(course_id: str):
     """获取课程完整学习历史"""
+    course = db.get_course(course_id)
     sessions = db.get_sessions(course_id)
     history = []
     for s in sessions:
@@ -868,9 +874,10 @@ async def get_course_history(course_id: str):
                 end = datetime.fromisoformat(str(ended_at)[:19])
                 duration_minutes = max(1, int((end - start).total_seconds() // 60))
             except (ValueError, TypeError, OverflowError):
-                duration_minutes = (s.get("total_rounds") or 0) * 2
+                # 兜底：用课程设定的学习时长，不用 rounds*2
+                duration_minutes = course.get("current_duration", 30) if s.get("total_rounds", 0) > 0 else 0
         else:
-            duration_minutes = (s.get("total_rounds") or 0) * 2
+            duration_minutes = course.get("current_duration", 30) if s.get("total_rounds", 0) > 0 else 0
 
         s_utc = _utc_dict(_utc_dict(s, "started_at"), "ended_at")
 
@@ -955,9 +962,9 @@ async def get_session_detail(session_id: str):
             end = datetime.strptime(session["ended_at"][:19], "%Y-%m-%d %H:%M:%S")
             duration_minutes = max(1, int((end - start).total_seconds() // 60))
         except (ValueError, IndexError):
-            duration_minutes = (session.get("total_rounds") or 0) * 2
+            duration_minutes = course.get("current_duration", 30) if session.get("total_rounds", 0) > 0 else 0
     else:
-        duration_minutes = (session.get("total_rounds") or 0) * 2
+        duration_minutes = course.get("current_duration", 30) if session.get("total_rounds", 0) > 0 else 0
 
     return {
         "session": {

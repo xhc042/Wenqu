@@ -302,6 +302,8 @@ def _migrate_schema():
             conn.execute("ALTER TABLE courses ADD COLUMN reading_mode TEXT DEFAULT 'standard'")
         if "mastery_progress" not in cols:
             conn.execute("ALTER TABLE courses ADD COLUMN mastery_progress TEXT DEFAULT '{}'")
+        if "import_tokens" not in cols:
+            conn.execute("ALTER TABLE courses ADD COLUMN import_tokens INTEGER DEFAULT 0")
 
         # 检查 chapters 表
         cols2 = {row["name"] for row in conn.execute("PRAGMA table_info(chapters)")}
@@ -457,6 +459,16 @@ def update_course_duration(course_id: str, duration: int):
     conn = get_conn()
     try:
         conn.execute("UPDATE courses SET current_duration=? WHERE id=?", (duration, course_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def update_course_import_tokens(course_id: str, tokens: int):
+    """更新课程导入阶段消耗的 token 估算值"""
+    conn = get_conn()
+    try:
+        conn.execute("UPDATE courses SET import_tokens=? WHERE id=?", (tokens, course_id))
         conn.commit()
     finally:
         conn.close()
@@ -639,10 +651,14 @@ def get_course_learning_stats(course_id: str) -> dict:
                 total_minutes += rounds * 2
             # 估算token：每轮对话平均约800 tokens（输入+输出）
             total_tokens += rounds * 800
+        # 加上书籍导入阶段消耗的 token
+        course = conn.execute("SELECT import_tokens FROM courses WHERE id=?", (course_id,)).fetchone()
+        import_tokens = course["import_tokens"] if course else 0
         return {
             "total_minutes": max(1, total_minutes),
             "total_rounds": total_rounds_sum,
-            "total_tokens": total_tokens,
+            "total_tokens": total_tokens + import_tokens,
+            "import_tokens": import_tokens,
         }
     finally:
         conn.close()
