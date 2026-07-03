@@ -671,6 +671,11 @@ async function submitCreateCourse() {
             source_path: sourcePath,
             content_text: mode === 'text' ? document.getElementById('text-content').value : '',
             reading_mode: AppState.selectedReadingMode,
+            // v1.20.1: 高级设置 - 并发度（前端 slider 1-6，不传则后端用 config 默认值）
+            generation_concurrency: (() => {
+                const el = document.getElementById('concurrency-slider');
+                return el ? parseInt(el.value, 10) : undefined;
+            })(),
         });
 
         showToast('课程创建成功！', 'success');

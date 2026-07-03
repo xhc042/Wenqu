@@ -82,6 +82,7 @@ from routes.task_routes import (
     find_active_task_for_course as route_find_active_task,
     update_task_async, update_task_step_async,
     fail_task_async, set_task_handle_async,
+    write_task_progress_sync,  # v1.20.1: sync 进度写入（callback 用）
 )
 from routes.defense_settings import (
     api_generate_defense_questions,
@@ -265,13 +266,18 @@ async def run_chapter_generation(task_id: str):
             def snapshot_progress_cb(current, total, title):
                 pct = 25 + int((current / total) * 45)
                 short_title = title[:15] + "..." if len(title) > 15 else title
-                task["steps"][1]["detail"] = f"[{current}/{total}] {short_title}"
-                task["progress"] = pct
+                # v1.20.1: 走 write_task_progress_sync,持同步锁原子写入两个字段
+                write_task_progress_sync(
+                    task,
+                    progress=pct,
+                    step_idx=1,
+                    step_detail=f"[{current}/{total}] {short_title}",
+                )
 
             try:
                 result = await _run_speed_mode_postprocess(
                     course_id, chapters, chapter_titles,
-                    source_type, source_path, concurrency=2,
+                    source_type, source_path, concurrency=task.get("concurrency"),
                     progress_callback=snapshot_progress_cb,
                 )
                 await _persist_speed_results(course_id, result)
@@ -303,11 +309,20 @@ async def run_chapter_generation(task_id: str):
 
                 # 注: progress_cb 同 snapshot_progress_cb,直接改 task 引用
                 def progress_cb(current, total, message):
-                    task["steps"][1]["detail"] = message
-                    task["progress"] = 50 + int((current / total) * 30)
+                    # v1.20.1: 走 write_task_progress_sync,持同步锁原子写入两个字段
+                    write_task_progress_sync(
+                        task,
+                        progress=50 + int((current / total) * 30),
+                        step_idx=1,
+                        step_detail=message,
+                    )
 
                 try:
-                    items = await generate_syllabus_items(course_id, ch_list, progress_callback=progress_cb)
+                    items = await generate_syllabus_items(
+                        course_id, ch_list,
+                        progress_callback=progress_cb,
+                        concurrency=task.get("concurrency"),
+                    )
                     if items:
                         for chapter_index, description in items:
                             db.add_syllabus_item(course_id, chapter_index, description)
@@ -380,12 +395,17 @@ async def list_courses():
 
 @app.post("/api/courses")
 async def create_course(data: dict):
-    """创建课程（支持file/url/text/recommendation）"""
+    """创建课程（支持file/url/text/recommendation）
+
+    v1.20.1: 支持 concurrency 参数（前端高级设置面板传入，控制章节生成并发度）
+    """
     result = await route_create_course(data)
-    
+
     # 如果有内容来源，自动启动异步分章任务
     source_type = data.get("source_type", "text")
     source_path = data.get("source_path", "")
+    # v1.20.1: 用户可覆盖并发度（不传则用 config.DEFAULT_GENERATION_CONCURRENCY）
+    concurrency = data.get("generation_concurrency")
     if source_type != "recommendation" and source_path:
         task_id = str(uuid.uuid4())[:8]
         async with _async_tasks_lock:
@@ -395,6 +415,7 @@ async def create_course(data: dict):
                 "type": "chapters_generate",
                 "status": TASK_STATUS["PENDING"],
                 "progress": 0,
+                "concurrency": concurrency,  # v1.20.1: 透传给后台任务
                 "steps": [
                     {"name": "正在智能分章...", "status": "pending", "detail": ""},
                     {"name": "生成教学大纲", "status": "pending", "detail": ""},
@@ -406,12 +427,12 @@ async def create_course(data: dict):
                 "created_at": datetime.now().isoformat(),
             }
         import logging
-        logging.info(f"[异步任务] 创建任务 {task_id} 用于课程 {result['course_id']}")
+        logging.info(f"[异步任务] 创建任务 {task_id} 用于课程 {result['course_id']}（concurrency={concurrency}）")
         # v1.4 评审 🟡 #6: 保存 task_handle 到 async_tasks[task_id],便于未来 cancel / 跟踪
         task_handle = asyncio.create_task(run_chapter_generation(task_id))
         await set_task_handle_async(task_id, task_handle)
         result["task_id"] = task_id
-    
+
     return result
 
 

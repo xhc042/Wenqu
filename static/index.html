@@ -182,6 +182,23 @@
                         <button class="btn btn-primary" onclick="submitCreateCourse()">🚀 创建课程</button>
                         <button class="btn btn-outline" onclick="switchView('dashboard')">取消</button>
                     </div>
+
+                    <!-- v1.20.1: 高级设置 - 并发度调节（影响章节生成速度） -->
+                    <details style="margin-top:12px;font-size:13px;color:var(--text-secondary)">
+                        <summary style="cursor:pointer;user-select:none">⚙️ 高级设置</summary>
+                        <div style="margin-top:8px;padding:12px;background:var(--bg-card);border-radius:6px;border:1px solid var(--border)">
+                            <label style="display:flex;justify-content:space-between;align-items:center">
+                                <span>章节生成并发度</span>
+                                <span id="concurrency-value" style="font-weight:600;color:var(--accent)">3</span>
+                            </label>
+                            <input type="range" id="concurrency-slider" min="1" max="6" value="3" step="1"
+                                   style="width:100%;margin-top:6px"
+                                   oninput="document.getElementById('concurrency-value').textContent=this.value">
+                            <div style="margin-top:4px;font-size:12px;color:var(--text-secondary);line-height:1.5">
+                                越高越快,但可能触发 LLM 限流。1=最保守(串行),3=推荐,6=激进。
+                            </div>
+                        </div>
+                    </details>
                 </div>
             </div>
 

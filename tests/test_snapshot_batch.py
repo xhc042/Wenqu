@@ -149,31 +149,35 @@ async def test_batch_progress_callback_on_failure():
     assert calls[2][0] == 3
 
 
-# ==================== v1.x: 默认并发 = 2 ====================
+# ==================== v1.20.1: 默认并发改读 config ====================
 
 
-def test_batch_default_concurrency_is_2():
-    """默认并发从 3 改为 2（业务诉求：避免瞬时高并发打 LLM 配额）"""
+def test_batch_default_concurrency_is_config_default():
+    """v1.20.1: 默认 concurrency 改为 None，由 config.DEFAULT_GENERATION_CONCURRENCY 解析（=3）"""
+    from config import DEFAULT_GENERATION_CONCURRENCY
     sig = inspect.signature(extract_chapter_snapshots_batch)
-    assert sig.parameters["concurrency"].default == 2, (
-        f"默认并发应为 2，实际 {sig.parameters['concurrency'].default}"
+    assert sig.parameters["concurrency"].default is None, (
+        f"默认 concurrency 应为 None（运行时从 config 读），实际 {sig.parameters['concurrency'].default}"
+    )
+    assert DEFAULT_GENERATION_CONCURRENCY == 3, (
+        f"config 默认并发应为 3,实际 {DEFAULT_GENERATION_CONCURRENCY}"
     )
 
 
-def test_postprocess_default_concurrency_is_2():
-    """_run_speed_mode_postprocess 默认并发也是 2（保持一致）"""
+def test_postprocess_default_concurrency_is_config_default():
+    """v1.20.1: _run_speed_mode_postprocess 默认 concurrency 同样改为 None + 读 config"""
     from app import _run_speed_mode_postprocess
     sig = inspect.signature(_run_speed_mode_postprocess)
-    assert sig.parameters["concurrency"].default == 2
+    assert sig.parameters["concurrency"].default is None
 
 
 @pytest.mark.asyncio
-async def test_batch_default_concurrency_runtime_is_2():
+async def test_batch_default_concurrency_runtime_is_config_default():
     """
-    运行时验证：不传 concurrency 时，并发上限确实为 2
-    通过 Semaphore 的 _value 间接观测（注入并发计数 fake）
+    v1.20.1: 运行时验证——不传 concurrency 时,实际并发上限等于 config.DEFAULT_GENERATION_CONCURRENCY (3)
     """
-    chapters = [(i, f"章{i}", f"内容{i}") for i in range(6)]
+    from config import DEFAULT_GENERATION_CONCURRENCY
+    chapters = [(i, f"章{i}", f"内容{i}") for i in range(10)]
     in_flight = {"max": 0, "cur": 0}
 
     async def fake_snap(content, title):
@@ -185,10 +189,10 @@ async def test_batch_default_concurrency_runtime_is_2():
 
     with patch("chunker.extract_chapter_snapshot", new_callable=AsyncMock) as mock:
         mock.side_effect = fake_snap
-        # 不传 concurrency → 使用默认值
+        # 不传 concurrency → 使用默认值（config.DEFAULT_GENERATION_CONCURRENCY = 3）
         result = await extract_chapter_snapshots_batch(chapters)
 
-    assert len(result) == 6
-    assert in_flight["max"] <= 2, (
-        f"默认 concurrency 应为 2，但实测瞬时并发={in_flight['max']}"
+    assert len(result) == 10
+    assert in_flight["max"] <= DEFAULT_GENERATION_CONCURRENCY, (
+        f"默认 concurrency 应为 {DEFAULT_GENERATION_CONCURRENCY}，但实测瞬时并发={in_flight['max']}"
     )

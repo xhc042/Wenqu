@@ -7,6 +7,7 @@
 
 import asyncio
 import copy
+import threading
 import uuid
 import logging
 from datetime import datetime
@@ -30,6 +31,13 @@ async_tasks: dict[str, dict] = {}
 # 协程锁: 保护后台 coroutine 与 read 路由(get_task / get_course → find_active_task_for_course)
 # 之间的混合状态。v1.4 评审 🟡 #5+#9 把原来 30+ 处直接 task["..."] = ... 收敛到这里。
 _tasks_lock = asyncio.Lock()
+
+# v1.20.1: 同步锁 — 保护 chuker 内 callback 的多字段同步写入
+# 场景: snapshot_progress_cb / progress_cb 是 sync 函数,在 chunker 协程上下文中
+# 同步写入 task["steps"][i]["detail"] + task["progress"] 两个字段。两次 callback 之间
+# 读路径可能看到"progress 已更新但 detail 还是上一轮" 的中间态。
+# 读路径在 deepcopy task["steps"] 时也持这把锁,保证原子快照。
+_task_write_lock = threading.Lock()
 
 
 async def create_task(
@@ -106,20 +114,47 @@ async def find_active_task_for_course(course_id: str) -> Optional[dict]:
 
     v1.4 评审 🟡 #5: 返回深拷贝的 steps,防止 caller 在后台 task 继续写 task["steps"]
     时看到混合状态(原版返回的是 live reference,锁内构造 dict 但 list 不复制)。
+
+    v1.20.1: 在 deepcopy 步骤前临时释放 asyncio 锁、改持 _task_write_lock 同步锁,
+    防止 chunker 内的 sync progress_callback 在 deepcopy 中途插入两字段写入
+    (progress 和 steps[?].detail 不同步)。读取 progress/status 也走同步锁保持一致。
     """
     async with _tasks_lock:
         for task_id, task in async_tasks.items():
             if task.get("course_id") == course_id and task.get("status") in ["pending", "processing"]:
+                # 持同步锁一次性快照 progress + steps,防止 callback 中途插入
+                with _task_write_lock:
+                    snapshot_progress = task["progress"]
+                    snapshot_status = task["status"]
+                    snapshot_current_step = task["current_step"]
+                    snapshot_error = task.get("error")
+                    snapshot_task_id = task["task_id"]
+                    snapshot_type = task["type"]
+                    snapshot_steps = copy.deepcopy(task["steps"])
                 return {
-                    "task_id": task["task_id"],
-                    "type": task["type"],
-                    "status": task["status"],
-                    "progress": task["progress"],
-                    "steps": copy.deepcopy(task["steps"]),
-                    "current_step": task["current_step"],
-                    "error": task.get("error"),
+                    "task_id": snapshot_task_id,
+                    "type": snapshot_type,
+                    "status": snapshot_status,
+                    "progress": snapshot_progress,
+                    "steps": snapshot_steps,
+                    "current_step": snapshot_current_step,
+                    "error": snapshot_error,
                 }
     return None
+
+
+def write_task_progress_sync(task: dict, *, progress: Optional[int] = None, step_idx: Optional[int] = None, step_detail: Optional[str] = None) -> None:
+    """v1.20.1: 同步进度写入（供 chunker 内的 sync progress_callback 使用）
+
+    持 _task_write_lock 一次性原子更新 progress + step detail,
+    与 find_active_task_for_course 的读路径协调,避免"progress=B / detail=A"的撕裂。
+    """
+    with _task_write_lock:
+        if progress is not None:
+            task["progress"] = progress
+        if step_idx is not None and 0 <= step_idx < len(task.get("steps", [])):
+            if step_detail is not None:
+                task["steps"][step_idx]["detail"] = step_detail
 
 
 # ==================== 异步更新 helper(取代 run_chapter_generation 中 30+ 处直接 task["..."] = ...) ====================

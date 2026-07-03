@@ -72,6 +72,11 @@ WebSocket /ws
     - `_run_speed_mode_postprocess` 默认 `concurrency` 同步收敛到 2
     - `_generate_fallback_key_points` 不再 `[:30]` 截断 viewpoint（兜底链路也保留完整对象）
     - `_build_highlights_fallback`（LLM 三次重试全失败后的终极兜底）也不再 `vp[:30]` 截断（与 _generate_fallback_key_points 是两条独立路径,wenqu-reviewer v1.x review 抓到漏改,已修复）
+  - **v1.20.1：并发优化 — 30 章书导入从 ~60s → ~25s**
+    - `llm_client.LLMClient` 改用实例级单例 `httpx.AsyncClient`（含连接池 `Limits(max_connections=20, max_keepalive=10)`），每次 LLM 调用省 ~1-2s TCP+TLS 握手。`aclose()` / `close_all_clients()` 提供 graceful shutdown 入口
+    - `chunker.generate_syllabus_items` 由串行 for 循环改为 `asyncio.gather` 并发批（Semaphore 限流，6 章→2 批并行），单批失败 fallback 隔离
+    - `config.get_generation_concurrency(override)` 统一并发度解析（默认 3，clamp 到 [1, 6]），`_run_speed_mode_postprocess` / `extract_chapter_snapshots_batch` / `generate_syllabus_items` 三处统一读此配置
+    - `POST /api/courses` 支持可选 `generation_concurrency` 请求字段（前端高级设置面板透传）
   - `state_machine._get_mastery_hint/_check` 按 importance desc 取,文本含 `[重要度N/5]` 标记
   - SHARE 阶段:优先揭示核心观点,不从基础概念开始
   - PROBE 阶段:必须先攻高重要度知识点,显式禁止停留在基础定义

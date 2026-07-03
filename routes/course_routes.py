@@ -150,10 +150,15 @@ async def _run_speed_mode_postprocess(
     chapter_titles: List[str],
     source_type: str,
     source_path: str,
-    concurrency: int = 2,
+    concurrency: Optional[int] = None,
     progress_callback=None,
 ) -> dict:
-    """速读模式后处理（统一函数）"""
+    """速读模式后处理（统一函数）
+
+    v1.20.1: concurrency 默认值改读 config.DEFAULT_GENERATION_CONCURRENCY
+    """
+    from config import get_generation_concurrency
+    concurrency = get_generation_concurrency(concurrency)
     import asyncio as _asyncio
 
     # Step 1: 准备 chapter_idx/content/title

@@ -6,6 +6,7 @@ import os
 import json
 import sys
 from pathlib import Path
+from typing import Optional
 
 # 项目根目录
 BASE_DIR = Path(__file__).parent.resolve()
@@ -368,3 +369,29 @@ def get_llm_config():
 def update_llm_config(**kwargs):
     """更新LLM配置"""
     LLM_CONFIG.update(kwargs)
+
+
+# ==================== 课程生成并发度配置 ====================
+# v1.20.1 新增: 控制章节生成（快照 / 掌握项）的并行 LLM 调用数
+# - DEFAULT_GENERATION_CONCURRENCY: 默认并发度（推荐 3，对 DeepSeek 等限流 API 较安全）
+# - MAX_GENERATION_CONCURRENCY: 前端 slider 上限（防止用户调到 20 打爆 LLM 配额）
+# - MIN_GENERATION_CONCURRENCY: 前端 slider 下限（1 = 串行，最保守）
+DEFAULT_GENERATION_CONCURRENCY = 3
+MAX_GENERATION_CONCURRENCY = 6
+MIN_GENERATION_CONCURRENCY = 1
+
+
+def get_generation_concurrency(override: Optional[int] = None) -> int:
+    """获取课程生成的并发度（带边界裁剪）
+
+    Args:
+        override: 调用方（如前端）传入的 override 值，None 则用默认值
+    """
+    if override is None:
+        v = DEFAULT_GENERATION_CONCURRENCY
+    else:
+        try:
+            v = int(override)
+        except (TypeError, ValueError):
+            v = DEFAULT_GENERATION_CONCURRENCY
+    return max(MIN_GENERATION_CONCURRENCY, min(MAX_GENERATION_CONCURRENCY, v))

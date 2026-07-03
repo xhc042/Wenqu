@@ -16,6 +16,20 @@ from config import get_llm_config, get_model_tier_config, DEPTH_CONFIG
 import database as db
 
 
+# v1.20.1 优化: 全局 httpx 连接池（单例 AsyncClient）
+# 复用 TCP/TLS 连接,避免每次 LLM 调用新建 client 浪费 1-2s 握手
+_HTTPX_LIMITS = httpx.Limits(
+    max_connections=20,           # 总连接上限（够 4 本课 × 3 并发 + 余量）
+    max_keepalive_connections=10, # 保持活跃连接
+)
+_HTTPX_TIMEOUT_FACTORY = lambda seconds: httpx.Timeout(
+    connect=10.0,  # 连接超时单独控制,避免被读超时吃掉
+    read=float(seconds) if seconds else 60.0,
+    write=10.0,
+    pool=10.0,
+)
+
+
 # v1.5 优化: LLM 响应缓存，避免重复调用相同内容的 LLM
 # 使用 OrderedDict 实现 LRU 淘汰
 class _LRUCache(OrderedDict):
@@ -83,6 +97,35 @@ class LLMClient:
         self._model = cfg["model"]
         self._timeout = cfg.get("timeout", 60)
         self._tier = tier
+        # v1.20.1: 单例 httpx.AsyncClient（懒加载 + 连接池复用）
+        self._http_client: Optional[httpx.AsyncClient] = None
+        self._http_client_lock = asyncio.Lock()
+
+    async def _get_http_client(self) -> httpx.AsyncClient:
+        """懒加载 httpx 客户端（每个 LLMClient 实例一个，复用连接池）
+
+        v1.20.1: 把"每次 chat 都新建 AsyncClient"改成"实例级单例 + 共享连接池"
+        省去每次 TCP+TLS 握手 (≈1-2s)。配置变更 (refresh_all) 后实例被清空,
+        下次 _get_client 会重新 new LLMClient,顺势重建 httpx 客户端。
+        """
+        if self._http_client is None or self._http_client.is_closed:
+            async with self._http_client_lock:
+                if self._http_client is None or self._http_client.is_closed:
+                    self._http_client = httpx.AsyncClient(
+                        timeout=_HTTPX_TIMEOUT_FACTORY(self._timeout),
+                        limits=_HTTPX_LIMITS,
+                        http2=False,  # DeepSeek 等 OpenAI 兼容 API 多数不支持 h2
+                    )
+        return self._http_client
+
+    async def aclose(self):
+        """关闭 httpx 客户端（graceful shutdown 用）"""
+        if self._http_client and not self._http_client.is_closed:
+            try:
+                await self._http_client.aclose()
+            except Exception:
+                pass
+            self._http_client = None
 
     @property
     def api_key(self) -> str:
@@ -145,42 +188,43 @@ class LLMClient:
             yield "⚠️ 尚未配置模型，请在设置中添加并激活一个 LLM 提供商和模型。"
             return
 
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            try:
-                async with client.stream(
-                    "POST",
-                    f"{self._base_url}/chat/completions",
-                    headers=self._headers(),
-                    json={
-                        "model": self._model,
-                        "messages": messages,
-                        "temperature": temperature,
-                        "max_tokens": max_tokens,
-                        "stream": True,
-                    },
-                ) as resp:
-                    if resp.status_code != 200:
-                        await resp.aread()
-                        yield f"⚠️ API错误 ({resp.status_code})"
-                        return
+        # v1.20.1: 复用单例 httpx 客户端（连接池）
+        client = await self._get_http_client()
+        try:
+            async with client.stream(
+                "POST",
+                f"{self._base_url}/chat/completions",
+                headers=self._headers(),
+                json={
+                    "model": self._model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "stream": True,
+                },
+            ) as resp:
+                if resp.status_code != 200:
+                    await resp.aread()
+                    yield f"⚠️ API错误 ({resp.status_code})"
+                    return
 
-                    async for line in resp.aiter_lines():
-                        if line.startswith("data: "):
-                            data_str = line[6:].strip()
-                            if data_str == "[DONE]":
-                                break
-                            try:
-                                data = json.loads(data_str)
-                                delta = data.get("choices", [{}])[0].get("delta", {})
-                                content = delta.get("content", "")
-                                if content:
-                                    yield content
-                            except json.JSONDecodeError:
-                                continue
-            except httpx.TimeoutException:
-                yield "⏳ API请求超时了"
-            except Exception:
-                yield "⚠️ 网络好像有点问题"
+                async for line in resp.aiter_lines():
+                    if line.startswith("data: "):
+                        data_str = line[6:].strip()
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            data = json.loads(data_str)
+                            delta = data.get("choices", [{}])[0].get("delta", {})
+                            content = delta.get("content", "")
+                            if content:
+                                yield content
+                        except json.JSONDecodeError:
+                            continue
+        except httpx.TimeoutException:
+            yield "⏳ API请求超时了"
+        except Exception:
+            yield "⚠️ 网络好像有点问题"
 
     async def chat(
         self,
@@ -217,22 +261,23 @@ class LLMClient:
         if response_format:
             body["response_format"] = response_format
 
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            try:
-                resp = await client.post(
-                    f"{self._base_url}/chat/completions",
-                    headers=self._headers(),
-                    json=body,
-                )
-                if resp.status_code != 200:
-                    return "⚠️ API错误"
-                data = resp.json()
-                result = data["choices"][0]["message"]["content"]
-                # v1.5: 写入缓存
-                _RESPONSE_CACHE[cache_key] = result
-                return result
-            except Exception:
-                return "⚠️ 网络好像有点问题"
+        # v1.20.1: 复用单例 httpx 客户端（连接池）
+        client = await self._get_http_client()
+        try:
+            resp = await client.post(
+                f"{self._base_url}/chat/completions",
+                headers=self._headers(),
+                json=body,
+            )
+            if resp.status_code != 200:
+                return "⚠️ API错误"
+            data = resp.json()
+            result = data["choices"][0]["message"]["content"]
+            # v1.5: 写入缓存
+            _RESPONSE_CACHE[cache_key] = result
+            return result
+        except Exception:
+            return "⚠️ 网络好像有点问题"
 
     async def chat_json(self, messages: List[dict], temperature: float = 0.3) -> dict:
         """
@@ -381,16 +426,38 @@ class MultiModelClient:
     def refresh_tier(self, tier: str):
         """刷新指定层级的客户端（配置变更后调用）"""
         if tier in self._instances:
-            del self._instances[tier]
+            old = self._instances.pop(tier)
+            # v1.20.1: 关闭老实例的 httpx 连接池
+            try:
+                asyncio.create_task(old.aclose())
+            except RuntimeError:
+                # 无 event loop 时静默跳过（测试场景）
+                pass
 
     def refresh_all(self):
         """刷新所有层级客户端"""
+        for inst in self._instances.values():
+            try:
+                asyncio.create_task(inst.aclose())
+            except RuntimeError:
+                pass
         self._instances.clear()
 
 
 # 全局单例
 llm = LLMClient(tier="default")
 multi_llm = MultiModelClient()
+
+
+async def close_all_clients():
+    """关闭全局所有 LLM 客户端的 httpx 连接（graceful shutdown 用）
+
+    v1.20.1 新增。FastAPI lifespan / 测试 teardown 调用,避免连接泄漏告警。
+    """
+    await llm.aclose()
+    for inst in multi_llm._instances.values():
+        await inst.aclose()
+    multi_llm._instances.clear()
 
 
 def get_depth_prompt(depth: str) -> dict:
