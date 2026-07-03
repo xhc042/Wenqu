@@ -1064,15 +1064,20 @@ function renderCourseUI(course, data) {
                     <span>🔤 Token：<strong>${tokensStr}</strong></span>
                 </div>
             </div>
-            <div style="display:flex;gap:8px">
+            <div style="display:flex;gap:8px;align-items:center">
                 <button class="btn btn-outline btn-sm" onclick="showCourseOverview()">📊 全书总览</button>
-                ${course.reading_mode === 'speed' ? '<button class="btn btn-outline btn-sm" onclick="showSnapshotsModal()">🚀 知识快照</button>' : ''}
-                ${course.reading_mode === 'deep' ? '<button class="btn btn-outline btn-sm" onclick="showSpiritualNotesModal()">🧠 思辨笔记</button>' : ''}
                 <button class="btn btn-outline btn-sm" onclick="showContractModal()">📋 学习契约</button>
-                <button class="btn btn-outline btn-sm" onclick="showSlidersModal()">🎛️ 风格调控</button>
-                <button class="btn btn-outline btn-sm" onclick="switchView('model-config');loadModelConfig()">🔧 模型配置</button>
-                <button class="btn btn-outline btn-sm" onclick="showAllSyllabusModal()">📋 全书知识点</button>
-                <button class="btn btn-danger btn-sm" onclick="deleteCurrentCourse()">🗑️</button>
+                <div class="settings-menu-wrapper" style="position:relative">
+                    <button class="btn btn-outline btn-sm" onclick="toggleSettingsMenu(this)" id="course-settings-btn">⚙️ 设置 ▾</button>
+                    <div class="settings-dropdown" id="course-settings-dropdown" style="display:none;position:absolute;right:0;top:calc(100% + 4px);background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);box-shadow:var(--shadow);min-width:180px;z-index:1000;padding:6px 0">
+                        ${course.reading_mode === 'speed' ? '<div class="settings-dropdown-item" onclick="showSnapshotsModal();closeSettingsMenu()">🚀 知识快照</div>' : ''}
+                        ${course.reading_mode === 'deep' ? '<div class="settings-dropdown-item" onclick="showSpiritualNotesModal();closeSettingsMenu()">🧠 思辨笔记</div>' : ''}
+                        <div class="settings-dropdown-item" onclick="showSlidersModal();closeSettingsMenu()">🎛️ 风格调控</div>
+                        <div class="settings-dropdown-item" onclick="showAllSyllabusModal();closeSettingsMenu()">📋 全书知识点</div>
+                        <div class="settings-dropdown-divider"></div>
+                        <div class="settings-dropdown-item danger" onclick="if(confirm(\'确定要删除这个课程吗？\')){deleteCurrentCourse()}closeSettingsMenu()">🗑️ 删除课程</div>
+                    </div>
+                </div>
             </div>
         </div>
     `;
@@ -1205,57 +1210,40 @@ function renderChapters(chapters, syllabus, chapterSessionCounts = {}, readingMo
 
             const sessionCount = chapterSessionCounts[ch.idx] || 0;
 
-            // 速读模式：简洁展示，包含快照信息
+            // 速读模式：3块结构（标题+单tag / 单行summary / 操作按钮）
             if (isSpeedMode) {
-                // 构建核心信息标签
-                const coreTags = [];
-                if (ch.is_core) coreTags.push('<span class="tag tag-core" style="font-size:11px;background:rgba(255,107,107,0.15);color:#ff6b6b;border:none">⭐ 核心</span>');
-                if (ch.importance && ch.importance > 0.7) coreTags.push('<span class="tag" style="font-size:11px;background:rgba(255,193,7,0.15);color:#ffc107;border:none">🔥 重要</span>');
-                
-                // 速读模式：有掌握项的章节标注"精华知识点"
-                if (chapterSyllabus.length > 0) {
-                    coreTags.push('<span style="font-size:11px;padding:2px 8px;background:rgba(108,92,231,0.1);color:var(--accent);border-radius:10px">📋 精华知识点</span>');
-                }
-                
-                const snapshotInfo = [];
-                if (ch.learning_goal) snapshotInfo.push(`<span style="font-size:12px;color:#636e72">🎯 ${escapeHtml(ch.learning_goal)}</span>`);
-                if (ch.core_viewpoint) snapshotInfo.push(`<span style="font-size:12px;color:#636e72">💡 ${escapeHtml(ch.core_viewpoint)}</span>`);
-                
-                const keywordsHtml = (ch.keywords && ch.keywords.length > 0) 
-                    ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px">${ch.keywords.map(k => `<span style="font-size:11px;padding:2px 8px;background:rgba(108,92,231,0.1);color:var(--accent);border-radius:10px">${escapeHtml(k)}</span>`).join('')}</div>`
+                // 单 tag 优先级：is_core > importance ≥ 0.7 > 有掌握项 > 无tag
+                const singleTag = ch.is_core
+                    ? '<span style="font-size:11px;padding:2px 8px;background:rgba(255,107,107,0.12);color:#e17055;border-radius:10px;font-weight:500">⭐ 核心</span>'
+                    : (ch.importance && ch.importance >= 0.7)
+                    ? '<span style="font-size:11px;padding:2px 8px;background:rgba(255,193,7,0.12);color:#d68910;border-radius:10px">🔥 重要</span>'
+                    : (chapterSyllabus.length > 0)
+                    ? `<span style="font-size:11px;padding:2px 8px;background:rgba(108,92,231,0.1);color:var(--accent);border-radius:10px">📋 ${chapterSyllabus.length} 知识点</span>`
                     : '';
 
-                // 掌握项标签
-                const masteryTags = chapterSyllabus.length > 0 ? chapterSyllabus.map(s => {
-                    const displayText = s.description.slice(0, 40) + (s.description.length > 40 ? '...' : '');
-                    const isMastered = s.status === 'mastered';
-                    return `<span class="tag tag-${isMastered ? 'mastered' : s.status === 'in_progress' ? 'progress' : 'pending'}" style="margin:2px 2px;cursor:pointer;font-size:10px" title="${s.description}" onclick="viewSyllabusDetail(${s.id}, this.title)">${displayText}${isMastered ? ' ✅' : ''}</span>` +
-                        (isMastered ? '' : `<button class="btn btn-xs" style="font-size:9px;padding:0 3px;margin-left:1px;vertical-align:middle;border:none;background:var(--success);color:#fff;border-radius:3px;cursor:pointer" onclick="event.stopPropagation();markSyllabusMastered(${s.id}, this)" title="标记为已掌握">✓</button>`);
-                }).join('') : '';
+                // 单行 summary：优先 learning_goal，次选 core_viewpoint
+                const summaryText = ch.learning_goal || ch.core_viewpoint || '';
+                const summaryHtml = summaryText
+                    ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:3px">💡 ${escapeHtml(summaryText)}</div>`
+                    : '';
 
-                // 速读模式：无掌握项的章节显示"推荐学习"提示
-                const recommendedTag = chapterSyllabus.length === 0 ? '<span style="font-size:11px;padding:2px 8px;background:rgba(40,167,69,0.1);color:#28a745;border-radius:10px;margin-left:4px">📌 推荐学习</span>' : '';
+                // 操作标签：有学习记录的显示次数
+                const learnLabel = sessionCount > 0 ? `✅ 已学 ${sessionCount} 次` : '快速浏览';
 
                 div.innerHTML = `
                     <div class="chapter-index">${levelIcon}</div>
                     <div class="chapter-info">
                         <div class="chapter-title" style="font-weight:${depth <= 1 ? '600' : '400'}">
                             ${ch.title}
-                            ${coreTags.join('')}
-                            ${recommendedTag}
+                            ${chapterSyllabus.length > 0 ? `<span style="font-size:11px;margin-left:6px;color:var(--text-secondary)">${mastered}/${chapterSyllabus.length} ✓</span>` : ''}
+                            ${singleTag}
                         </div>
-                        ${snapshotInfo.length > 0 ? `<div style="margin-top:4px">${snapshotInfo.join('<br>')}</div>` : ''}
-                        ${keywordsHtml}
-                        <div class="chapter-items-count" style="color:#636e72;font-size:12px;margin-top:4px">
-                            ${sessionCount > 0 ? `<span style="color:var(--success)">✅ 已学习 ${sessionCount} 次</span>` : '<span>💡 快速浏览即可</span>'}
-                            ${chapterSyllabus.length > 0 ? `<span style="margin-left:8px">📊 ${mastered}/${total} 项掌握</span>` : ''}
-                        </div>
-                        ${masteryTags ? `<div style="margin-top:6px;flex-wrap:wrap">${masteryTags}</div>` : ''}
+                        ${summaryHtml}
                     </div>
                     <div class="chapter-actions">
                         ${sessionCount > 0 ? `<button class="btn btn-outline btn-sm chapter-history-btn" onclick="event.stopPropagation();showChapterHistory(${ch.idx})" title="查看学习历史">📜</button>` : ''}
-                        <button class="btn btn-outline btn-sm" onclick="startChat(${ch.idx})">
-                            ${sessionCount > 0 ? '再次学习' : '快速浏览'}
+                        <button class="btn ${sessionCount > 0 ? 'btn-outline' : 'btn-primary'} btn-sm" onclick="startChat(${ch.idx})">
+                            ${learnLabel}
                         </button>
                     </div>
                 `;
@@ -1558,6 +1546,34 @@ async function saveSliders() {
 function closeSlidersModal() {
     document.getElementById('sliders-modal').classList.remove('active');
 }
+
+// ==================== 课程设置下拉菜单 ====================
+function toggleSettingsMenu(btn) {
+    const dropdown = document.getElementById('course-settings-dropdown');
+    const isOpen = dropdown.style.display === 'block';
+    // Close all
+    document.querySelectorAll('.settings-dropdown').forEach(d => d.style.display = 'none');
+    if (!isOpen) {
+        dropdown.style.display = 'block';
+        // Update caret
+        btn.textContent = '⚙️ 设置 ▴';
+    } else {
+        btn.textContent = '⚙️ 设置 ▾';
+    }
+}
+
+function closeSettingsMenu() {
+    document.querySelectorAll('.settings-dropdown').forEach(d => d.style.display = 'none');
+    const btn = document.getElementById('course-settings-btn');
+    if (btn) btn.textContent = '⚙️ 设置 ▾';
+}
+
+// 点击外部关闭
+document.addEventListener('click', function(e) {
+    if (!e.target.closest('.settings-menu-wrapper')) {
+        closeSettingsMenu();
+    }
+});
 
 // ==================== 对话 ====================
 async function startChat(chapterIndex) {
@@ -3381,53 +3397,153 @@ document.addEventListener('DOMContentLoaded', function() {
 
 // ==================== 查看全书知识点 ====================
 let allSyllabusCache = [];
+let syllabusFilterState = 'all'; // 'all' | 'pending' | 'mastered'
 
 function showAllSyllabusModal() {
+    syllabusFilterState = 'all';
     var modal = document.createElement('div');
     modal.className = 'modal-overlay active';
     modal.style.zIndex = '2000';
+    modal.onclick = function(e) { if (e.target === modal) modal.remove(); };
     var container = document.createElement('div');
     container.className = 'modal';
+    container.style.maxWidth = '720px';
     container.onclick = function(e) { e.stopPropagation(); };
-    container.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px"><h2>📋 全书知识点</h2><div style="display:flex;gap:8px"><button class="btn btn-outline btn-sm" id="syllabus-refresh-btn" onclick="refreshSyllabusData()">🔄 刷新知识点</button><button class="btn btn-outline btn-sm" onclick="this.closest(\'.modal-overlay\').remove()">✕</button></div></div><div id="syllabus-list-modal" style="max-height:60vh;overflow-y:auto;padding-right:8px"></div>';
+    container.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+            <h2>📋 全书知识点</h2>
+            <button class="btn btn-outline btn-sm" onclick="this.closest('.modal-overlay').remove()">✕</button>
+        </div>
+        <div id="syllabus-progress-bar" style="margin-bottom:16px;padding:14px 16px;background:var(--bg-primary);border-radius:var(--radius-sm);border-left:3px solid var(--accent)">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+                <span style="font-size:13px;color:var(--text-secondary)">结业门槛</span>
+                <span id="syllabus-progress-text" style="font-size:13px;font-weight:500"></span>
+            </div>
+            <div class="progress-bar-outer" style="height:8px">
+                <div class="progress-bar-inner" id="syllabus-progress-fill" style="height:100%"></div>
+            </div>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:16px" id="syllabus-filter-tabs">
+            <button class="option-btn option-btn-sm selected" data-filter="all" onclick="setSyllabusFilter('all')">全部</button>
+            <button class="option-btn option-btn-sm" data-filter="pending" onclick="setSyllabusFilter('pending')">⏳ 待学习</button>
+            <button class="option-btn option-btn-sm" data-filter="mastered" onclick="setSyllabusFilter('mastered')">✅ 已掌握</button>
+        </div>
+        <div id="syllabus-list-modal" style="max-height:55vh;overflow-y:auto;padding-right:8px"></div>
+    `;
     modal.appendChild(container);
     document.body.appendChild(modal);
     loadAllSyllabusData();
+}
+
+function setSyllabusFilter(filter) {
+    syllabusFilterState = filter;
+    document.querySelectorAll('#syllabus-filter-tabs .option-btn').forEach(function(btn) {
+        btn.classList.toggle('selected', btn.dataset.filter === filter);
+    });
+    renderSyllabusListFiltered();
 }
 
 async function loadAllSyllabusData() {
     if (!AppState.currentCourseId) return;
     try {
         var data = await API.get('/api/courses/' + AppState.currentCourseId);
-        var items = data.syllabus || [];
-        var el = document.getElementById('syllabus-list-modal');
-        if (!el) return;
-        if (items.length === 0) { el.innerHTML = '<div style="text-align:center;color:var(--text-secondary);padding:40px">暂无知识点</div>'; return; }
+        allSyllabusCache = data.syllabus || [];
         var chapters = data.chapters || [];
-        var chapterMap = {};
-        chapters.forEach(function(c) { chapterMap[c.idx] = c.title; });
-        el.innerHTML = items.map(function(s, idx) {
-            var chTitle = chapterMap[s.chapter_index] || '第' + (s.chapter_index + 1) + '章';
-            var st = s.status === 'mastered' ? '已掌握' : s.status === 'in_progress' ? '进行中' : '待学习';
-            var bg = s.status === 'mastered' ? 'rgba(0,184,148,0.1)' : s.status === 'in_progress' ? 'rgba(253,203,110,0.1)' : 'rgba(222,230,233,0.1)';
-            var cl = s.status === 'mastered' ? 'var(--success)' : s.status === 'in_progress' ? '#d68910' : '#636e72';
-            var bd = s.status === 'mastered' ? 'var(--success)' : s.status === 'in_progress' ? '#d68910' : '#dfe6e9';
-            return '<div style="background:var(--bg-secondary);border-radius:var(--radius-sm);padding:16px;margin-bottom:12px;border-left:3px solid var(--accent);box-shadow:var(--shadow)">' +
-                '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">' +
-                '<div><span style="font-size:12px;color:var(--accent);font-weight:500">第' + (idx + 1) + '个知识点</span>' +
-                '<span style="font-size:12px;color:#636e72;margin-left:8px">' + chTitle + '</span></div>' +
-                '<div style="display:flex;align-items:center;gap:6px">' +
-                (s.status === 'mastered' ? '' : '<button class="btn btn-xs" style="font-size:10px;padding:2px 8px;border:none;background:var(--success);color:#fff;border-radius:4px;cursor:pointer" onclick="event.stopPropagation();markSyllabusMastered(' + s.id + ', this)">✓ 我已掌握</button>') +
-                '<span style="font-size:11px;padding:2px 8px;border-radius:4px;background:' + bg + ';color:' + cl + ';border:1px solid ' + bd + '">' + st + '</span></div></div>' +
-                '<div class="syllabus-item" style="font-size:14px;color:var(--text-primary);line-height:1.6;cursor:pointer" data-id="' + s.id + '" data-desc="' + escapeHtml(s.description) + '">' +
-                escapeHtml(s.description) + '</div></div>';
-        }).join('');
-        el.querySelectorAll('.syllabus-item').forEach(function(item) {
-            item.onclick = function() {
-                viewSyllabusDetail(parseInt(item.dataset.id), item.dataset.desc);
-            };
-        });
+        allSyllabusCache._chapterMap = {};
+        chapters.forEach(function(c) { allSyllabusCache._chapterMap[c.idx] = c.title; });
+        renderSyllabusListFiltered();
     } catch (e) { console.error('加载知识点失败', e); showToast('加载知识点失败', 'error'); }
+}
+
+function renderSyllabusListFiltered() {
+    var el = document.getElementById('syllabus-list-modal');
+    if (!el || !allSyllabusCache.length) { el && (el.innerHTML = '<div style="text-align:center;color:var(--text-secondary);padding:40px">暂无知识点</div>'); return; }
+
+    var items = allSyllabusCache.filter(function(s) {
+        if (syllabusFilterState === 'pending') return s.status !== 'mastered';
+        if (syllabusFilterState === 'mastered') return s.status === 'mastered';
+        return true;
+    });
+
+    // 总进度
+    var total = allSyllabusCache.length;
+    var mastered = allSyllabusCache.filter(function(s) { return s.status === 'mastered'; }).length;
+    var pending = total - mastered;
+    var pct = total > 0 ? Math.round(mastered / total * 100) : 0;
+    var progressText = document.getElementById('syllabus-progress-text');
+    if (progressText) progressText.textContent = '已掌握 ' + mastered + '/' + total + ' (' + pct + '%)';
+    var progressFill = document.getElementById('syllabus-progress-fill');
+    if (progressFill) progressFill.style.width = pct + '%';
+
+    if (items.length === 0) {
+        el.innerHTML = '<div style="text-align:center;color:var(--text-secondary);padding:40px">' + (syllabusFilterState === 'pending' ? '⏳ 已全部掌握！' : '✅ 暂无已掌握项') + '</div>';
+        return;
+    }
+
+    // 按章节分组
+    var byChapter = {};
+    items.forEach(function(s) {
+        var idx = s.chapter_index;
+        if (!byChapter[idx]) byChapter[idx] = [];
+        byChapter[idx].push(s);
+    });
+
+    var chapterMap = allSyllabusCache._chapterMap || {};
+    var html = '';
+    Object.keys(byChapter).sort(function(a, b) { return parseInt(a) - parseInt(b); }).forEach(function(chIdx) {
+        var chItems = byChapter[chIdx];
+        var chTitle = chapterMap[chIdx] || ('第' + (parseInt(chIdx) + 1) + '章');
+        var chMastered = chItems.filter(function(s) { return s.status === 'mastered'; }).length;
+        var chTotal = chItems.length;
+        var chPct = chTotal > 0 ? Math.round(chMastered / chTotal * 100) : 0;
+        var statusIcon = chMastered === chTotal ? '✓' : (chMastered > 0 ? '⚠' : '');
+
+        html += '<div style="margin-bottom:20px">';
+        html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border)">';
+        html += '<div style="display:flex;align-items:center;gap:8px">';
+        html += '<span style="font-size:13px;font-weight:600">' + escapeHtml(chTitle) + '</span>';
+        html += '<span style="font-size:12px;color:' + (chMastered === chTotal ? 'var(--success)' : chMastered > 0 ? '#d68910' : 'var(--text-secondary)') + '">' + statusIcon + ' ' + chMastered + '/' + chTotal + '</span>';
+        html += '</div>';
+        if (chMastered < chTotal) {
+            html += '<button class="btn btn-xs" style="font-size:10px;padding:2px 8px;border:none;background:var(--accent);color:#fff;border-radius:4px;cursor:pointer" onclick="markAllChapterMastered(' + chIdx + ', event)">补齐</button>';
+        }
+        html += '</div>';
+
+        chItems.forEach(function(s) {
+            var st = s.status === 'mastered' ? '✅ 已掌握' : s.status === 'in_progress' ? '⏳ 进行中' : '⏳ 待学习';
+            var stBg = s.status === 'mastered' ? 'rgba(0,184,148,0.1)' : s.status === 'in_progress' ? 'rgba(253,203,110,0.1)' : 'rgba(222,230,233,0.1)';
+            var stCl = s.status === 'mastered' ? 'var(--success)' : s.status === 'in_progress' ? '#d68910' : '#636e72';
+            html += '<div style="padding:10px 12px;margin-bottom:6px;border-radius:6px;background:var(--bg-secondary);border-left:2px solid ' + (s.status === 'mastered' ? 'var(--success)' : 'var(--border)') + '">';
+            html += '<div style="display:flex;justify-content:space-between;align-items:flex-start">';
+            html += '<div class="syllabus-item" style="flex:1;font-size:13px;color:var(--text-primary);line-height:1.5;cursor:pointer;padding-right:8px" data-id="' + s.id + '" data-desc="' + escapeHtml(s.description) + '">' + escapeHtml(s.description) + '</div>';
+            html += '<div style="display:flex;align-items:center;gap:6px;flex-shrink:0">';
+            if (s.status !== 'mastered') {
+                html += '<button class="btn btn-xs" style="font-size:10px;padding:2px 7px;border:none;background:var(--success);color:#fff;border-radius:4px;cursor:pointer" onclick="event.stopPropagation();markSyllabusMastered(' + s.id + ', this)">✓</button>';
+            }
+            html += '<span style="font-size:10px;padding:2px 7px;border-radius:4px;background:' + stBg + ';color:' + stCl + '">' + st + '</span>';
+            html += '</div></div></div>';
+        });
+        html += '</div>';
+    });
+
+    el.innerHTML = html;
+    el.querySelectorAll('.syllabus-item').forEach(function(item) {
+        item.onclick = function() {
+            viewSyllabusDetail(parseInt(item.dataset.id), item.dataset.desc);
+        };
+    });
+}
+
+async function markAllChapterMastered(chapterIndex, e) {
+    e.stopPropagation();
+    var items = allSyllabusCache.filter(function(s) { return s.chapter_index === chapterIndex && s.status !== 'mastered'; });
+    for (var i = 0; i < items.length; i++) {
+        try {
+            await API.patch('/api/syllabus/' + items[i].id, { status: 'mastered' });
+        } catch (err) { /* skip */ }
+    }
+    showToast('🎉 第' + (parseInt(chapterIndex) + 1) + '章已全部掌握！', 'success');
+    await loadAllSyllabusData();
 }
 
 async function refreshSyllabusData() {
@@ -3697,7 +3813,7 @@ function renderCourseOverviewModal(overview) {
 
     let html = '';
 
-    // === 第一部分：核心概览卡片（聚焦最重要信息）===
+    // === 第一块：数字概览 ===
     html += `
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px">
             <div style="background:linear-gradient(135deg,rgba(108,92,231,0.1),rgba(108,92,231,0.05));border-radius:12px;padding:20px;text-align:center">
@@ -3708,101 +3824,63 @@ function renderCourseOverviewModal(overview) {
             <div style="background:linear-gradient(135deg,rgba(0,184,148,0.1),rgba(0,184,148,0.05));border-radius:12px;padding:20px;text-align:center">
                 <div style="font-size:36px;font-weight:700;color:var(--success)">${coverage.total_chapters || overview.chapter_stats?.length || 0}</div>
                 <div style="font-size:13px;color:var(--text-secondary);margin-top:4px">总章节</div>
-                <div style="font-size:12px;color:var(--text-secondary);margin-top:2px">全书共 ${coverage.total_chapters || overview.chapter_stats?.length || 0} 章</div>
+                <div style="font-size:12px;color:var(--text-secondary);margin-top:2px">已学 ${overview.chapter_stats?.filter(function(ch){return ch.mastered>0}).length || 0} 章</div>
             </div>
         </div>
     `;
 
-    // === 第二部分：全书核心知识点（最重要，置顶显示）===
-    if (isSpeedMode && overview.highlights && overview.highlights.key_points && overview.highlights.key_points.length > 0) {
-        const h = overview.highlights;
-        html += `
-            <div style="margin-bottom:20px;padding:16px;background:linear-gradient(135deg, rgba(108,92,231,0.08), rgba(6,214,160,0.08));border-radius:12px;border:1px solid rgba(108,92,231,0.2)">
-                <h3 style="margin:0 0 12px;font-size:15px;color:var(--accent)">🔥 全书核心知识点</h3>
-                <div style="display:flex;flex-direction:column;gap:6px">
-                    ${h.key_points.slice(0, 8).map((point, i) => `
-                        <div style="display:flex;align-items:flex-start;gap:8px;padding:8px 12px;background:white;border-radius:8px">
-                            <span style="font-size:11px;padding:2px 8px;border-radius:4px;font-weight:600;white-space:nowrap;background:${i < 3 ? 'rgba(255,107,107,0.15)' : 'rgba(108,92,231,0.1)'};color:${i < 3 ? '#ff6b6b' : 'var(--accent)'}">${i < 3 ? '🔥 核心' : '📌 重要'}</span>
-                            <span style="font-size:13px;line-height:1.5">${escapeHtml(point)}</span>
-                        </div>
-                    `).join('')}
-                </div>
-            </div>
-        `;
-    }
-
-    // === 第三部分：智能学习路径（速读模式专用）===
+    // === 第二块：立即学习（L3 决策锚点，最醒目）===
     if (isSpeedMode && overview.recommended_order && typeof overview.recommended_order === 'object' && !Array.isArray(overview.recommended_order)) {
         const order = overview.recommended_order;
-        
-        // 下一步推荐（最醒目）
         const nextCh = order.next_chapter;
         if (nextCh && nextCh.idx !== undefined) {
             html += `
                 <div style="margin-bottom:20px;padding:16px;background:linear-gradient(135deg,rgba(253,203,110,0.15),rgba(253,203,110,0.05));border-radius:12px;border:2px solid rgba(255,193,7,0.3)">
                     <div style="font-size:13px;font-weight:600;color:#d68910;margin-bottom:8px">🎯 立即学习</div>
                     <div style="font-size:16px;font-weight:600">第${nextCh.idx + 1}章「${escapeHtml(nextCh.title || '')}」</div>
-                    ${nextCh.learning_goal ? `<div style="font-size:13px;color:var(--text-secondary);margin-top:4px">🎯 学习目标：${escapeHtml(nextCh.learning_goal)}</div>` : ''}
-                    ${nextCh.core_viewpoint ? `<div style="font-size:13px;color:var(--text-secondary);margin-top:2px">💡 核心观点：${escapeHtml(nextCh.core_viewpoint)}</div>` : ''}
+                    <div style="font-size:13px;color:var(--text-secondary);margin-top:4px">💡 ${escapeHtml(nextCh.learning_goal || nextCh.core_viewpoint || '')}</div>
                     <button class="btn btn-primary btn-sm" style="margin-top:12px" onclick="hideProgressOverlay();switchView('course-detail');setTimeout(()=>startChat(${nextCh.idx}),300)">开始学习 →</button>
-                </div>
-            `;
-        }
-
-        // 核心待学章节
-        if (order.core_to_learn && order.core_to_learn.length > 0) {
-            html += `
-                <div style="margin-bottom:20px">
-                    <h3 style="margin:0 0 10px;font-size:14px;color:var(--danger)">🔥 核心待学 (${order.core_to_learn.length}章)</h3>
-                    ${order.core_to_learn.slice(0, 5).map((ch, idx) => {
-                        const depsBadge = ch.deps_satisfied
-                            ? '<span style="font-size:10px;color:var(--success)">✓ 可学</span>'
-                            : '<span style="font-size:10px;color:var(--warning)">⏳ 需先学</span>';
-                        return `
-                            <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:rgba(255,107,107,0.04);border-radius:8px;margin-bottom:4px;border-left:3px solid var(--danger)">
-                                <span style="font-size:13px;font-weight:bold;color:var(--danger);min-width:20px">${idx + 1}.</span>
-                                <span style="flex:1;font-size:13px">第${ch.idx + 1}章「${escapeHtml(ch.title || '')}」</span>
-                                ${ch.learning_goal ? `<span style="font-size:11px;color:var(--text-secondary)">🎯 ${escapeHtml(ch.learning_goal)}</span>` : ''}
-                                ${depsBadge}
-                            </div>
-                        `;
-                    }).join('')}
-                    ${order.core_to_learn.length > 5 ? `<div style="font-size:11px;color:var(--text-secondary);padding:4px 12px">还有 ${order.core_to_learn.length - 5} 章...</div>` : ''}
-                </div>
-            `;
-        }
-
-        // 已学章节（简化显示）
-        if (order.learned && order.learned.length > 0) {
-            html += `
-                <div style="margin-bottom:20px">
-                    <h3 style="margin:0 0 10px;font-size:14px;color:var(--success)">✅ 已学习 (${order.learned.length}章)</h3>
-                    <div style="display:flex;flex-wrap:wrap;gap:4px">
-                        ${order.learned.map(ch => `
-                            <span style="font-size:11px;padding:3px 8px;background:rgba(0,184,148,0.08);color:var(--success);border-radius:4px">第${ch.idx + 1}章</span>
-                        `).join('')}
-                    </div>
                 </div>
             `;
         }
     }
 
-    // === 第四部分：章节进度总览（精简显示）===
+    // === 第三块：全书核心知识点（速读模式）===
+    if (isSpeedMode && overview.highlights && overview.highlights.key_points && overview.highlights.key_points.length > 0) {
+        const h = overview.highlights;
+        const showPoints = h.key_points.slice(0, 3);
+        const extraCount = h.key_points.length - 3;
+        html += `
+            <div style="margin-bottom:20px;padding:16px;background:linear-gradient(135deg,rgba(108,92,231,0.06),rgba(6,214,160,0.06));border-radius:12px;border:1px solid rgba(108,92,231,0.15)">
+                <h3 style="margin:0 0 10px;font-size:14px;color:var(--accent)">🔥 全书核心（${h.key_points.length}件你必须知道的）</h3>
+                <div style="display:flex;flex-direction:column;gap:5px">
+                    ${showPoints.map((point, i) => `
+                        <div style="display:flex;align-items:flex-start;gap:8px;padding:6px 10px;background:white;border-radius:6px">
+                            <span style="font-size:11px;padding:2px 7px;border-radius:4px;font-weight:600;white-space:nowrap;background:rgba(255,107,107,0.15);color:#e17055">${i+1}</span>
+                            <span style="font-size:13px;line-height:1.5">${escapeHtml(point)}</span>
+                        </div>
+                    `).join('')}
+                </div>
+                ${extraCount > 0 ? `<div style="margin-top:8px;font-size:12px;color:var(--accent);cursor:pointer;text-align:center;padding:4px" onclick="showSnapshotsModal()">+ 还有 ${extraCount} 条重要观点 ⌄</div>` : ''}
+            </div>
+        `;
+    }
+
+    // === 第四块：章节进度（只显示有进度的 5-8 章）===
     if (overview.chapter_stats && overview.chapter_stats.length > 0) {
-        // 只显示有进度的章节
         const activeChapters = overview.chapter_stats.filter(ch => ch.importance > 0 || ch.mastered > 0);
-        
-        if (activeChapters.length > 0) {
+        const shownChapters = activeChapters.slice(0, 8);
+        if (shownChapters.length > 0) {
             html += `
                 <div style="margin-bottom:20px">
-                    <h3 style="margin:0 0 10px;font-size:14px">📊 重点章节进度</h3>
+                    <h3 style="margin:0 0 10px;font-size:14px;color:var(--text-secondary)">📊 章节进度</h3>
             `;
-            activeChapters.slice(0, 10).forEach(ch => {
+            shownChapters.forEach(ch => {
                 const chPercent = ch.total > 0 ? Math.round(ch.mastered / ch.total * 100) : (ch.importance > 0 ? 0 : 100);
-                const importanceStar = ch.importance > 0.7 ? '⭐' : '';
+                const chLabel = ch.importance > 0.7 ? ' ⭐' : '';
                 html += `
-                    <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px">
-                        <span style="min-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(ch.title || `第${ch.idx + 1}章`)}${importanceStar}</span>
+                    <div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border);font-size:13px">
+                        <span style="min-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(ch.title || `第${ch.idx + 1}章`)}${chLabel}</span>
                         <div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden">
                             <div style="height:100%;width:${chPercent}%;background:${chPercent === 100 ? 'var(--success)' : 'var(--accent)'};border-radius:3px"></div>
                         </div>
@@ -3810,16 +3888,19 @@ function renderCourseOverviewModal(overview) {
                     </div>
                 `;
             });
+            if (activeChapters.length > 8) {
+                html += `<div style="font-size:11px;color:var(--text-secondary);padding:4px 0;text-align:center">还有 ${activeChapters.length - 8} 章...</div>`;
+            }
             html += '</div>';
         }
     }
 
-    // === 第五部分：学习建议（如有）===
+    // === 第五块：AI 建议（单行）===
     if (overview.recommendation) {
         html += `
-            <div style="padding:16px;background:rgba(108,92,231,0.05);border-radius:12px;border:1px solid rgba(108,92,231,0.15)">
-                <h3 style="margin:0 0 8px;font-size:14px;color:var(--accent)">💡 学习建议</h3>
-                <p style="margin:0;font-size:13px;line-height:1.6">${escapeHtml(overview.recommendation)}</p>
+            <div style="padding:12px 16px;background:rgba(108,92,231,0.05);border-radius:10px;border:1px solid rgba(108,92,231,0.12)">
+                <span style="font-size:13px;color:var(--text-secondary)">💡 </span>
+                <span style="font-size:13px;color:var(--text-primary)">${escapeHtml(overview.recommendation)}</span>
             </div>
         `;
     }
