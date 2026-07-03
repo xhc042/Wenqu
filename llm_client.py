@@ -7,12 +7,15 @@
 import json
 import asyncio
 import hashlib
+import logging
 from typing import AsyncGenerator, Optional, List, Dict, Any
 from collections import OrderedDict
 
 import httpx
 
 from config import get_llm_config, get_model_tier_config, DEPTH_CONFIG
+
+logger = logging.getLogger("wenqu.llm")
 import database as db
 
 
@@ -223,7 +226,17 @@ class LLMClient:
                             continue
         except httpx.TimeoutException:
             yield "⏳ API请求超时了"
-        except Exception:
+        except httpx.ConnectError as e:
+            logger.warning(f"LLM 连接失败: {e}")
+            yield "⚠️ 无法连接 AI 服务，请检查网络或 API 配置"
+        except httpx.PoolTimeout:
+            logger.warning("LLM 连接池耗尽（并发过高）")
+            yield "⚠️ 服务器繁忙，请稍后重试"
+        except httpx.ProtocolError as e:
+            logger.warning(f"LLM 协议错误: {e}")
+            yield "⚠️ AI 服务连接异常，请稍后重试"
+        except Exception as e:
+            logger.error(f"LLM 调用异常: {e}", exc_info=True)
             yield "⚠️ 网络好像有点问题"
 
     async def chat(
@@ -276,7 +289,20 @@ class LLMClient:
             # v1.5: 写入缓存
             _RESPONSE_CACHE[cache_key] = result
             return result
-        except Exception:
+        except httpx.TimeoutException:
+            logger.warning("LLM 非流式调用超时")
+            return "⏳ API请求超时了"
+        except httpx.ConnectError as e:
+            logger.warning(f"LLM 连接失败: {e}")
+            return "⚠️ 无法连接 AI 服务，请检查网络或 API 配置"
+        except httpx.PoolTimeout:
+            logger.warning("LLM 连接池耗尽（并发过高）")
+            return "⚠️ 服务器繁忙，请稍后重试"
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"LLM HTTP 状态错误: {e.response.status_code} {e}")
+            return f"⚠️ AI 服务返回错误（{e.response.status_code}），请检查 API 配置"
+        except Exception as e:
+            logger.error(f"LLM 非流式调用异常: {e}", exc_info=True)
             return "⚠️ 网络好像有点问题"
 
     async def chat_json(self, messages: List[dict], temperature: float = 0.3) -> dict:

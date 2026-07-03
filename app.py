@@ -16,6 +16,7 @@ import asyncio
 import uuid
 import re
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List
@@ -35,6 +36,25 @@ from config import (
     READING_MODE_CONFIG, DEFAULT_READING_MODE,
     MODEL_TIER_CONFIG, DEFAULT_MODEL_TIER,
 )
+
+# v1.20.2: 日志落盘到 wenqu_data/logs/，单文件 5MB，最多保留 5 个
+# 这样 LLM 调用异常、连接池耗尽、API 限速等都有地方查
+_LOG_DIR = DATA_DIR / "logs"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+_log_handler = RotatingFileHandler(
+    _LOG_DIR / "wenqu.log",
+    maxBytes=5 * 1024 * 1024,
+    backupCount=5,
+    encoding="utf-8",
+)
+_log_handler.setFormatter(logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+))
+_log_handler.setLevel(logging.INFO)
+logging.getLogger().addHandler(_log_handler)
+# 同步给 llm_client 模块的 logger
+logging.getLogger("wenqu.llm").addHandler(_log_handler)
+logging.getLogger("wenqu.llm").setLevel(logging.INFO)
 from database import init_db
 import database as db
 from modules.llm_config_manager import (
