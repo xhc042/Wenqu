@@ -1,10 +1,16 @@
 {
-  "hash": "888fa25c247f",
-  "timestamp": "2026-06-30T00:54:42.006853",
+  "hash": "88e934b5feef",
+  "timestamp": "2026-07-02T23:09:07.804346",
   "files_changed": [
-    ".harness/docs/architecture.md"
+    "app.py",
+    "chunker.py",
+    "database.py",
+    "routes/course_routes.py",
+    "static/css/style.css",
+    "static/index.html",
+    "static/js/app.js"
   ],
-  "files_count": 1,
+  "files_count": 7,
   "tests_passed": true,
-  "needs_review": false
+  "needs_review": true
 }
