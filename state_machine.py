@@ -741,8 +741,11 @@ class DialogueStateMachine:
 
         yield f"\n\n---\n\n📚 **本节课学习结束**（{reason}）\n\n"
 
-        # 异步触发课后闭环
-        await self._after_class_routines()
+        # 课后闭环改为 fire-and-forget：SESSION_END 立即发给前端，
+        # 不等 LLM 调用跑完，改善用户感知等待时间。
+        # sm 对象本身在 active_sessions 中，任务跑完前不会被 GC。
+        import asyncio
+        asyncio.create_task(self._after_class_routines())
 
     def _update_mastery_progress(self):
         """更新课程的掌握进度"""
