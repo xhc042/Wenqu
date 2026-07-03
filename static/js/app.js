@@ -67,16 +67,6 @@ const API = {
     },
 };
 
-// ==================== 章节标题工具 ====================
-/**
- * 去掉标题中嵌入的章节编号前缀，让 idx 成为唯一编号源。
- * 匹配: 第X章 / 第X.X节 / 第X.x.x节 / 第一章 / 一、第X章 等
- */
-function stripChapterPrefix(title) {
-    if (!title) return '';
-    return title.replace(/^[\u3000\s]*(?:第[一二三四五六七八九十百零\d]+(?:\.\d+)*\s*[章节节篇部]\s*[：:、]?\s*)/i, '').trim();
-}
-
 // ==================== Toast 提示 ====================
 function showToast(message, type = '') {
     let toast = document.getElementById('toast');
@@ -1244,7 +1234,7 @@ function renderChapters(chapters, syllabus, chapterSessionCounts = {}, readingMo
                     <div class="chapter-index">${levelIcon}</div>
                     <div class="chapter-info">
                         <div class="chapter-title" style="font-weight:${depth <= 1 ? '600' : '400'}">
-                            ${stripChapterPrefix(ch.title)}
+                            ${ch.title}
                             ${chapterSyllabus.length > 0 ? `<span style="font-size:11px;margin-left:6px;color:var(--text-secondary)">${mastered}/${chapterSyllabus.length} ✓</span>` : ''}
                             ${singleTag}
                         </div>
@@ -1263,7 +1253,7 @@ function renderChapters(chapters, syllabus, chapterSessionCounts = {}, readingMo
                     <div class="chapter-index">${levelIcon}</div>
                     <div class="chapter-info">
                         <div class="chapter-title" style="font-weight:${depth <= 1 ? '600' : '400'}">
-                            ${stripChapterPrefix(ch.title)}
+                            ${ch.title}
                             ${!isLoaded ? '<span class="tag tag-pending" style="font-size:11px;margin-left:6px">⏳ 未加载</span>' : ''}
                             ${isLoaded && ch.summary ? '<span style="font-size:11px;color:#636e72;display:block;margin-top:2px">' + ch.summary.slice(0, 60) + '</span>' : ''}
                         </div>
@@ -1612,7 +1602,7 @@ async function startChat(chapterIndex) {
         }
 
         // 更新对话页顶部章节名称
-        document.getElementById('chat-chapter-name').textContent = stripChapterPrefix(chapter?.title) || chapterTitle;
+        document.getElementById('chat-chapter-name').textContent = chapter?.title || chapterTitle;
 
         // 检查章节是否已加载，未加载则触发懒加载
         if (chapter && !chapter.is_loaded) {
@@ -1759,7 +1749,7 @@ async function viewChapterSessionHistory(sessionId, chapterIdx) {
             try {
                 const courseData = await API.get(`/api/courses/${AppState.currentCourseId}`);
                 const chapter = courseData.chapters?.find(c => c.idx === chapterIdx);
-                if (chapter?.title) chapterTitle = stripChapterPrefix(chapter.title);
+                if (chapter?.title) chapterTitle = chapter.title;
             } catch(e) {}
         }
 
@@ -1912,7 +1902,7 @@ async function viewSessionHistory(sessionId) {
             try {
                 const courseData = await API.get(`/api/courses/${AppState.currentCourseId}`);
                 const chapter = courseData.chapters?.find(c => c.idx === session.chapter_index);
-                if (chapter?.title) chapterTitle = stripChapterPrefix(chapter.title);
+                if (chapter?.title) chapterTitle = chapter.title;
             } catch(e) {}
         }
 
@@ -3847,7 +3837,7 @@ function renderCourseOverviewModal(overview) {
             html += `
                 <div style="margin-bottom:20px;padding:16px;background:linear-gradient(135deg,rgba(253,203,110,0.15),rgba(253,203,110,0.05));border-radius:12px;border:2px solid rgba(255,193,7,0.3)">
                     <div style="font-size:13px;font-weight:600;color:#d68910;margin-bottom:8px">🎯 立即学习</div>
-                    <div style="font-size:16px;font-weight:600">第${nextCh.idx + 1}章「${escapeHtml(stripChapterPrefix(nextCh.title) || '')}」</div>
+                    <div style="font-size:16px;font-weight:600">第${nextCh.idx + 1}章「${escapeHtml(nextCh.title || '')}」</div>
                     <div style="font-size:13px;color:var(--text-secondary);margin-top:4px">💡 ${escapeHtml(nextCh.learning_goal || nextCh.core_viewpoint || '')}</div>
                     <button class="btn btn-primary btn-sm" style="margin-top:12px" onclick="hideProgressOverlay();switchView('course-detail');setTimeout(()=>startChat(${nextCh.idx}),300)">开始学习 →</button>
                 </div>
@@ -3890,7 +3880,7 @@ function renderCourseOverviewModal(overview) {
                 const chLabel = ch.importance > 0.7 ? ' ⭐' : '';
                 html += `
                     <div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border);font-size:13px">
-                        <span style="min-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(stripChapterPrefix(ch.title) || `第${ch.idx + 1}章`)}${chLabel}</span>
+                        <span style="min-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(ch.title || `第${ch.idx + 1}章`)}${chLabel}</span>
                         <div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden">
                             <div style="height:100%;width:${chPercent}%;background:${chPercent === 100 ? 'var(--success)' : 'var(--accent)'};border-radius:3px"></div>
                         </div>
@@ -4240,7 +4230,7 @@ function renderCourseOverview(overview) {
                 const chPercent = ch.total > 0 ? Math.round(ch.mastered / ch.total * 100) : 0;
                 return `
                     <div class="chapter-stat-item">
-                        <span class="chapter-name">${escapeHtml(stripChapterPrefix(ch.title) || `第${ch.idx + 1}章`)}</span>
+                        <span class="chapter-name">${escapeHtml(ch.title || `第${ch.idx + 1}章`)}</span>
                         <div class="progress-bar-mini">
                             <div class="progress-bar-mini-fill" style="width:${chPercent}%"></div>
                         </div>
