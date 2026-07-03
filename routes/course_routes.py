@@ -35,6 +35,35 @@ from llm_client import llm
 logger = logging.getLogger(__name__)
 
 
+# ==================== 章节编号提取 ====================
+# 匹配书籍原文中的章节编号，如"第五章"、"第5章"、"第5.2节"、"第一节"等
+# 注意：Python raw string 中 \d 会被当作字面反斜杠+d，故用 [0-9] 代替
+# 第? 必须放在捕获组内：'第' 本身不在 [一二...] 字符类里
+_CHAPTER_LABEL_RE = re.compile(
+    r"^(第?)([一二三四五六七八九十百零0-9]+(?:\.[0-9]+)*)\s*([章节篇部])\s*[：:、]?\s*"
+)
+
+
+def _extract_chapter_label(title: str) -> str:
+    """从章节标题中提取书本身的章节编号。
+
+    例如：
+      "第五章 深入掌握A股的ETF趋势交易" → "第五章"
+      "第5.2节 波浪理论的应用"           → "第5.2节"
+      "第一节 概述"                       → "第一节"
+      "前言"                              → ""
+    找不到编号时返回空字符串，前端会用 idx 显示。
+    """
+    if not title:
+        return ""
+    m = _CHAPTER_LABEL_RE.match(title)
+    # 组1=第?, 组2=数字/中文序号, 组3=章节篇部
+    return (m.group(1) + m.group(2) + m.group(3)) if m else ""
+
+
+
+
+
 # v1.5 优化: 预编译正则，避免每次调用重复编译
 _CHAPTER_NUM_RE = re.compile(r'第(\d+)章')
 
@@ -118,6 +147,7 @@ def _save_chapters_to_db(course_id: str, chapters: list, reading_mode: str) -> l
             parent_idx=meta.get("parent_idx", -1),
             level=meta.get("level", 0),
             sort_order=meta.get("sort_order", str(idx)),
+            chapter_label=_extract_chapter_label(title),
         )
 
     return chapter_titles
@@ -1098,6 +1128,7 @@ async def api_get_course_overview(course_id: str):
             chapter_stats.append({
                 "idx": ch["idx"],
                 "title": ch["title"],
+                "chapter_label": ch.get("chapter_label", ""),
                 "total": 1 if snapshot else 0,
                 "mastered": len(ch_sessions),
                 "is_loaded": ch.get("is_loaded", 0),
@@ -1227,6 +1258,7 @@ async def api_get_course_overview(course_id: str):
             chapter_stats.append({
                 "idx": ch["idx"],
                 "title": ch["title"],
+                "chapter_label": ch.get("chapter_label", ""),
                 "total": len(ch_items),
                 "mastered": sum(1 for s in ch_items if s["status"] == "mastered"),
                 "is_loaded": ch.get("is_loaded", 0),
@@ -1250,7 +1282,7 @@ async def api_get_course_overview(course_id: str):
                 priority = "medium"
             else:
                 priority = "low"
-            recommended_order.append({"idx": ch["idx"], "title": ch["title"], "priority": priority, "progress": f"{mastered}/{total}", "status": "已完成" if mastered_ratio == 1 else ("进行中" if mastered_ratio > 0 else "未开始")})
+            recommended_order.append({"idx": ch["idx"], "title": ch["title"], "chapter_label": ch.get("chapter_label", ""), "priority": priority, "progress": f"{mastered}/{total}", "status": "已完成" if mastered_ratio == 1 else ("进行中" if mastered_ratio > 0 else "未开始")})
 
         priority_order = {"high": 0, "medium": 1, "low": 2}
         recommended_order.sort(key=lambda x: (priority_order.get(x["priority"], 3), x["idx"]))

@@ -313,6 +313,7 @@ def _migrate_schema():
             ("parent_idx", "INTEGER DEFAULT -1"),
             ("level", "INTEGER DEFAULT 0"),
             ("sort_order", "TEXT DEFAULT ''"),
+            ("chapter_label", "TEXT DEFAULT ''"),
         ]:
             if col not in cols2:
                 conn.execute(f"ALTER TABLE chapters ADD COLUMN {col} {col_def}")
@@ -487,13 +488,13 @@ def update_course_teacher(course_id: str, teacher: str):
 
 def add_chapter(course_id: str, idx: int, title: str, content_slice: str = "", summary: str = "",
                 content_full: str = "", is_loaded: int = 1, parent_idx: int = -1,
-                level: int = 0, sort_order: str = "") -> int:
+                level: int = 0, sort_order: str = "", chapter_label: str = "") -> int:
     conn = get_conn()
     try:
         cur = conn.execute(
-            """INSERT INTO chapters (course_id, idx, title, content_slice, summary, content_full, is_loaded, parent_idx, level, sort_order)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (course_id, idx, title, content_slice, summary, content_full, is_loaded, parent_idx, level, sort_order),
+            """INSERT INTO chapters (course_id, idx, title, content_slice, summary, content_full, is_loaded, parent_idx, level, sort_order, chapter_label)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (course_id, idx, title, content_slice, summary, content_full, is_loaded, parent_idx, level, sort_order, chapter_label),
         )
         conn.execute("UPDATE courses SET total_chapters = (SELECT COUNT(*) FROM chapters WHERE course_id=?) WHERE id=?", (course_id, course_id))
         conn.commit()
